@@ -1,0 +1,14 @@
+[host_machine]
+system = 'fioxa'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+[binaries]
+c = 'gcc'
+cpp = 'g++'
+ar = 'ar'
+strip = 'strip'
+ld = 'ld'
+[built-in options]
+c_args = []
+cpp_args = []
