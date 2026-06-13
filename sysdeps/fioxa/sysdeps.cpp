@@ -10,28 +10,26 @@ extern "C" {
   [[noreturn]] extern void fioxa_panic();
 
   extern int fioxa_close(int);
+  extern int fioxa_clock(time_t*, long*);
   [[noreturn]] extern void fioxa_exit(int);
   extern int fioxa_isatty(int);
   extern int fioxa_map(size_t, void**);
   extern int fioxa_open(const char*, int, mode_t, int*);
   extern int fioxa_read(int, void*, size_t, ssize_t*);
   extern int fioxa_seek(int, off_t, int, off_t*);
+  extern int fioxa_sleep(long, long);
   extern void fioxa_set_fs_reg(void*);
   extern int fioxa_unmap(void*, size_t);
   extern int fioxa_write(int, const void*, size_t);
 }
 
 namespace mlibc {
-  void sys_libc_log(const char *message) {
-    fioxa_log(message);
-  }
+  void sys_libc_log(const char *message) { fioxa_log(message); }
   [[noreturn]] void sys_libc_panic() { fioxa_panic(); }
   
   int sys_anon_free(void *pointer, size_t size) { return fioxa_unmap(pointer, size); }
   int sys_clock_get(int clock, time_t *seconds, long *nanoseconds) {
-    *seconds = 2385587700;      // and that's the time that it's always been
-    *nanoseconds = 0;
-    return 0;
+    return fioxa_clock(seconds, nanoseconds);
   }
   int sys_close(int fd) { return fioxa_close(fd); }
   int sys_exit(int status) { fioxa_exit(status); }
@@ -47,15 +45,18 @@ namespace mlibc {
   int sys_seek(int fd, off_t offset, int whence, off_t *new_offset) {
     return fioxa_seek(fd, offset, whence, new_offset);
   }
+  int sys_sleep(time_t *secs, long *nanos) {
+    return fioxa_sleep(*secs, *nanos);
+  }
   int sys_tcb_set(void *pointer) { fioxa_set_fs_reg(pointer); return 0; }
   int sys_vm_map(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
     if (fd != -1) return -ENOSYS;
     return fioxa_map(size, window);
   }
   int sys_write(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
-    fioxa_write(fd, buf, count);
+    int ret = fioxa_write(fd, buf, count);
     *bytes_written = count;
-    return 0;
+    return ret;
   }
 
   int sys_anon_allocate(size_t size, void **pointer) {
