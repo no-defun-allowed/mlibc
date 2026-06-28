@@ -53,6 +53,7 @@ namespace mlibc {
     if (fd != -1) return -ENOSYS;
     return fioxa_map(size, window);
   }
+  int sys_vm_unmap(void *pointer, size_t size) { return fioxa_unmap(pointer, size); }
   int sys_write(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
     int ret = fioxa_write(fd, buf, count);
     *bytes_written = count;
