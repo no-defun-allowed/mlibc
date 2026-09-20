@@ -13,12 +13,14 @@ libc_sources += files(
 if not no_headers
 	install_headers(
 		'include/fstab.h',
+		'include/pthread_np.h',
 		'include/pty.h',
 		'include/utmp.h',
 	)
 	install_headers(
 		'include/arpa/nameser.h',
 		'include/arpa/nameser_compat.h',
+		'include/arpa/telnet.h',
 		subdir: 'arpa'
 	)
 	install_headers(
@@ -31,7 +33,6 @@ if not no_headers
 	)
 	install_headers(
 		'include/bits/bsd/bsd_stdlib.h',
-		'include/bits/bsd/bsd_unistd.h',
 		subdir: 'bits/bsd'
 	)
 endif

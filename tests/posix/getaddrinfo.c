@@ -1,4 +1,4 @@
-#if !defined(USE_HOST_LIBC)
+#if !defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)
 #include <mlibc-config.h>
 #endif
 
@@ -13,7 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#if __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC)
+#if __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC) || defined(USE_CROSS_LIBC)
 #include <ifaddrs.h>
 
 static bool has_ipv4_addr(void) {
@@ -51,7 +51,7 @@ static bool has_ipv6_addr(void) {
 	freeifaddrs(addrs);
 	return found;
 }
-#endif // __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC)
+#endif // __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC) || defined(USE_CROSS_LIBC)
 
 int main() {
 	struct addrinfo *res = NULL;
@@ -125,7 +125,7 @@ int main() {
 	freeaddrinfo(res);
 	res = NULL;
 
-#if __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC)
+#if __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC) || defined(USE_CROSS_LIBC)
 	// Test with AF_INET
 	hints.ai_family = AF_INET;
 	ret = getaddrinfo("localhost", NULL, &hints, &res);
@@ -183,7 +183,7 @@ int main() {
 
 	freeaddrinfo(res);
 	res = NULL;
-#endif // __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC)
+#endif // __MLIBC_LINUX_OPTION || defined(USE_HOST_LIBC) || defined(USE_CROSS_LIBC)
 
 	// Test AI_NUMERICSERV.
 	hints = (struct addrinfo){0};
@@ -228,6 +228,35 @@ int main() {
 	ret = getaddrinfo("localhost.localdomain", NULL, &hints, &res);
 	assert(ret == 0);
 	assert(res->ai_canonname);
+	freeaddrinfo(res);
+	res = NULL;
+
+	hints = (struct addrinfo){0};
+	hints.ai_family = AF_INET;
+
+	ret = getaddrinfo("127.0.0.1", "80", &hints, &res);
+	assert(ret == 0);
+
+	int count = 0;
+	bool found_tcp = false;
+	bool found_udp = false;
+
+	for (struct addrinfo *p = res; p != NULL; p = p->ai_next) {
+		count++;
+		if (p->ai_socktype == SOCK_STREAM && p->ai_protocol == IPPROTO_TCP)
+			found_tcp = true;
+		if (p->ai_socktype == SOCK_DGRAM && p->ai_protocol == IPPROTO_UDP)
+			found_udp = true;
+
+		assert(p->ai_family == AF_INET);
+		struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+		assert(sin->sin_port == htons(80));
+	}
+
+	assert(count >= 2);
+	assert(found_tcp);
+	assert(found_udp);
+
 	freeaddrinfo(res);
 	res = NULL;
 

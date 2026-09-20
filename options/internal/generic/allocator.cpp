@@ -3,8 +3,8 @@
 
 #include <bits/ensure.h>
 #include <frg/eternal.hpp>
+#include <mlibc/all-sysdeps.hpp>
 #include <mlibc/allocator.hpp>
-#include <mlibc/internal-sysdeps.hpp>
 #include <internal-config.h>
 
 #if !MLIBC_DEBUG_ALLOCATOR
@@ -13,13 +13,19 @@
 // Globals
 // --------------------------------------------------------
 
+struct AllocatorPackage {
+	AllocatorPackage()
+	: heap{virtualAllocator}, singleton{&heap} {}
+
+	VirtualAllocator virtualAllocator;
+	MemoryPool heap;
+	MemoryAllocator singleton;
+};
+
+constinit mlibc::lazy_eternal<AllocatorPackage> global_allocator_package;
+
 MemoryAllocator &getAllocator() {
-	// use frg::eternal to prevent a call to __cxa_atexit().
-	// this is necessary because __cxa_atexit() call this function.
-	static frg::eternal<VirtualAllocator> virtualAllocator;
-	static frg::eternal<MemoryPool> heap{virtualAllocator.get()};
-	static frg::eternal<MemoryAllocator> singleton{&heap.get()};
-	return singleton.get();
+	return global_allocator_package.get().singleton;
 }
 
 // --------------------------------------------------------
@@ -28,12 +34,12 @@ MemoryAllocator &getAllocator() {
 
 uintptr_t VirtualAllocator::map(size_t length) {
 	void *ptr;
-	__ensure(!mlibc::sys_anon_allocate(length, &ptr));
+	__ensure(!mlibc::sysdep<AnonAllocate>(length, &ptr));
 	return (uintptr_t)ptr;
 }
 
 void VirtualAllocator::unmap(uintptr_t address, size_t length) {
-	__ensure(!mlibc::sys_anon_free((void *)address, length));
+	__ensure(!mlibc::sysdep<AnonFree>((void *)address, length));
 }
 
 #else
@@ -91,11 +97,11 @@ void *MemoryAllocator::allocate(size_t size) {
 
 	// Two extra pages for metadata in front and guard page at the end
 	// Reserve the whole region as PROT_NONE...
-	if (int e = mlibc::sys_vm_map(nullptr, pg_size + pageSize * 2, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0, &ptr))
+	if (int e = mlibc::sysdep<VmMap>(nullptr, pg_size + pageSize * 2, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0, &ptr))
 		mlibc::panicLogger() << "sys_vm_map failed in MemoryAllocator::allocate (errno " << e << ")" << frg::endlog;
 
 	// ...Then replace pages to make them accessible, excluding the guard page
-	if (int e = mlibc::sys_vm_map(ptr, pg_size + pageSize, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0, &ptr))
+	if (int e = mlibc::sysdep<VmMap>(ptr, pg_size + pageSize, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0, &ptr))
 		mlibc::panicLogger() << "sys_vm_map failed in MemoryAllocator::allocate (errno " << e << ")" << frg::endlog;
 
 	void *meta = ptr;
@@ -152,10 +158,10 @@ void MemoryAllocator::deallocate(void *ptr, size_t size) {
 
 	if constexpr (neverReleaseVa) {
 		void *unused;
-		if (int e = mlibc::sys_vm_map(meta, meta->pagesSize + pageSize * 2, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0, &unused))
+		if (int e = mlibc::sysdep<VmMap>(meta, meta->pagesSize + pageSize * 2, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0, &unused))
 			mlibc::panicLogger() << "sys_vm_map failed in MemoryAllocator::deallocate (errno " << e << ")" << frg::endlog;
 	} else {
-		if (int e = mlibc::sys_vm_unmap(meta, meta->pagesSize + pageSize * 2))
+		if (int e = mlibc::sysdep<VmUnmap>(meta, meta->pagesSize + pageSize * 2))
 			mlibc::panicLogger() << "sys_vm_unmap failed in MemoryAllocator::deallocate (errno " << e << ")" << frg::endlog;
 	}
 }
@@ -199,11 +205,10 @@ size_t MemoryAllocator::get_size(void *ptr) {
 	return meta->allocatedSize;
 }
 
+constinit mlibc::lazy_eternal<MemoryAllocator> global_debug_allocator;
+
 MemoryAllocator &getAllocator() {
-	// use frg::eternal to prevent a call to __cxa_atexit().
-	// this is necessary because __cxa_atexit() call this function.
-	static frg::eternal<MemoryAllocator> singleton{};
-	return singleton.get();
+	return global_debug_allocator.get();
 }
 
 #endif /* !MLIBC_DEBUG_ALLOCATOR */

@@ -8,18 +8,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 
 #include <frg/small_vector.hpp>
+#include <mlibc/all-sysdeps.hpp>
 #include <mlibc/allocator.hpp>
+#include <mlibc/collation.hpp>
 #include <mlibc/debug.hpp>
-#include <mlibc/posix-sysdeps.hpp>
+#include <mlibc/global-config.hpp>
+#include <mlibc/locale.hpp>
 #include <mlibc/rtld-config.hpp>
-
-namespace {
-	constexpr bool debugPathResolution = false;
-} // namespace
+#include <mlibc/stdlib.hpp>
+#include <mlibc/strtofp.hpp>
 
 // Borrowed from musl
 static uint32_t init[] = {
@@ -116,14 +116,12 @@ void srand48(long int seed) {
 	seed48(arr);
 }
 
-long jrand48(unsigned short [3]) {
-	__ensure(!"Not implemented");
-	__builtin_unreachable();
+long jrand48(unsigned short s[3]) {
+	return (int32_t) (eand48_step(s, seed_48 + 3) >> 16);
 }
 
 long int mrand48(void) {
-	__ensure(!"Not implemented");
-	__builtin_unreachable();
+	return jrand48(seed_48);
 }
 
 // Borrowed from musl
@@ -181,38 +179,13 @@ char *setstate(char *state) {
 
 
 int mkostemps(char *pattern, int suffixlen, int flags) {
-	auto n = strlen(pattern);
-	if(n < (6 + static_cast<size_t>(suffixlen))) {
-		errno = EINVAL;
+	int fd = 0;
+	if (int e = mlibc::mkostemps(pattern, suffixlen, flags, &fd); e) {
+		errno = e;
 		return -1;
 	}
 
-	flags &= ~O_WRONLY;
-
-	for(size_t i = 0; i < 6; i++) {
-		if(pattern[n - (6 + suffixlen) + i] == 'X')
-			continue;
-		errno = EINVAL;
-		return -1;
-	}
-
-	// TODO: Do an exponential search.
-	for(size_t i = 0; i < 999999; i++) {
-		char sfx = pattern[n - suffixlen];
-		__ensure(sprintf(pattern + (n - (6 + suffixlen)), "%06zu", i) == 6);
-		pattern[n - suffixlen] = sfx;
-
-		int fd;
-		if(int e = mlibc::sys_open(pattern, O_RDWR | O_CREAT | O_EXCL | flags, S_IRUSR | S_IWUSR, &fd); !e) {
-			return fd;
-		}else if(e != EEXIST) {
-			errno = e;
-			return -1;
-		}
-	}
-
-	errno = EEXIST;
-	return -1;
+	return fd;
 }
 
 int mkostemp(char *pattern, int flags) {
@@ -228,7 +201,6 @@ int mkstemps(char *pattern, int suffixlen) {
 }
 
 char *mkdtemp(char *pattern) {
-	mlibc::infoLogger() << "mlibc mkdtemp(" << pattern << ") called" << frg::endlog;
 	auto n = strlen(pattern);
 	__ensure(n >= 6);
 	if(n < 6) {
@@ -245,7 +217,7 @@ char *mkdtemp(char *pattern) {
 	// TODO: Do an exponential search.
 	for(size_t i = 0; i < 999999; i++) {
 		__ensure(sprintf(pattern + (n - 6), "%06zu", i) == 6);
-		if(int e = mlibc::sys_mkdir(pattern, S_IRWXU); !e) {
+		if(int e = mlibc::sysdep_or_enosys<Mkdir>(pattern, S_IRWXU); !e) {
 			return pattern;
 		}else if(e != EEXIST) {
 			errno = e;
@@ -258,7 +230,7 @@ char *mkdtemp(char *pattern) {
 }
 
 char *realpath(const char *path, char *out) {
-	if(debugPathResolution)
+	if(mlibc::globalConfig().debugPathResolution)
 		mlibc::infoLogger() << "mlibc realpath(): Called on '" << path << "'" << frg::endlog;
 	frg::string_view path_view{path};
 
@@ -305,7 +277,7 @@ char *realpath(const char *path, char *out) {
 	size_t ls = 0;
 
 	auto process_segment = [&] (frg::string_view s_view) -> int {
-		if(debugPathResolution)
+		if(mlibc::globalConfig().debugPathResolution)
 			mlibc::infoLogger() << "mlibc realpath(): resolv is '" << resolv.data() << "'"
 					<< ", segment is " << s_view.data()
 					<< ", size: " << s_view.size() << frg::endlog;
@@ -332,25 +304,25 @@ char *realpath(const char *path, char *out) {
 		resolv[rsz + s_view.size()] = 0;
 
 		// stat() the path to (1) see if it exists and (2) see if it is a link.
-		if(!mlibc::sys_stat) {
+		if constexpr (!mlibc::IsImplemented<Stat>) {
 			MLIBC_MISSING_SYSDEP();
 			return ENOSYS;
 		}
-		if(debugPathResolution)
+		if(mlibc::globalConfig().debugPathResolution)
 			mlibc::infoLogger() << "mlibc realpath(): stat()ing '"
 					<< resolv.data() << "'" << frg::endlog;
 		struct stat st;
-		if(int e = mlibc::sys_stat(mlibc::fsfd_target::path,
+		if(int e = mlibc::sysdep_or_panic<Stat>(mlibc::fsfd_target::path,
 				-1, resolv.data(), AT_SYMLINK_NOFOLLOW, &st); e)
 			return e;
 
 		if(S_ISLNK(st.st_mode)) {
-			if(debugPathResolution) {
+			if(mlibc::globalConfig().debugPathResolution) {
 				mlibc::infoLogger() << "mlibc realpath(): Encountered symlink '"
 					<< resolv.data() << "'" << frg::endlog;
 			}
 
-			if(!mlibc::sys_readlink) {
+			if constexpr (!mlibc::IsImplemented<Readlink>) {
 				MLIBC_MISSING_SYSDEP();
 				return ENOSYS;
 			}
@@ -358,10 +330,10 @@ char *realpath(const char *path, char *out) {
 			ssize_t sz = 0;
 			char path[512];
 
-			if (int e = mlibc::sys_readlink(resolv.data(), path, 512, &sz); e)
+			if (int e = mlibc::sysdep_or_panic<Readlink>(resolv.data(), path, 512, &sz); e)
 				return e;
 
-			if(debugPathResolution) {
+			if(mlibc::globalConfig().debugPathResolution) {
 				mlibc::infoLogger() << "mlibc realpath(): Symlink resolves to '"
 					<< frg::string_view{path, static_cast<size_t>(sz)} << "'" << frg::endlog;
 			}
@@ -377,7 +349,7 @@ char *realpath(const char *path, char *out) {
 				strncpy(resolv.data(), path, sz);
 				resolv.data()[sz] = 0;
 
-				if(debugPathResolution) {
+				if(mlibc::globalConfig().debugPathResolution) {
 					mlibc::infoLogger() << "mlibc realpath(): Symlink is absolute, resolv: '"
 						<< resolv.data() << "'" << frg::endlog;
 				}
@@ -394,7 +366,7 @@ char *realpath(const char *path, char *out) {
 
 				ls = 0;
 
-				if(debugPathResolution) {
+				if(mlibc::globalConfig().debugPathResolution) {
 					mlibc::infoLogger() << "mlibc realpath(): Symlink is relative, resolv: '"
 						<< resolv.data() << "' lnk: '"
 						<< frg::string_view{lnk.data(), lnk.size()} << "'" << frg::endlog;
@@ -451,7 +423,7 @@ char *realpath(const char *path, char *out) {
 		resolv.push_back(0);
 	}
 
-	if(debugPathResolution)
+	if(mlibc::globalConfig().debugPathResolution)
 		mlibc::infoLogger() << "mlibc realpath(): Returns '" << resolv.data() << "'" << frg::endlog;
 
 	if(resolv.size() > PATH_MAX) {
@@ -470,20 +442,13 @@ char *realpath(const char *path, char *out) {
 // ----------------------------------------------------------------------------
 
 int ptsname_r(int fd, char *buffer, size_t length) {
-	auto sysdep = MLIBC_CHECK_OR_ENOSYS(mlibc::sys_ptsname, ENOSYS);
-
-	if(int e = sysdep(fd, buffer, length); e)
-		return e;
-
-	return 0;
+	return mlibc::sysdep_or_enosys<Ptsname>(fd, buffer, length);
 }
 
 char *ptsname(int fd) {
 	static char buffer[128];
 
-	auto sysdep = MLIBC_CHECK_OR_ENOSYS(mlibc::sys_ptsname, NULL);
-
-	if(int e = sysdep(fd, buffer, 128); e) {
+	if(int e = mlibc::sysdep_or_enosys<Ptsname>(fd, buffer, 128); e) {
 		errno = e;
 		return nullptr;
 	}
@@ -494,10 +459,10 @@ char *ptsname(int fd) {
 int posix_openpt(int flags) {
 	int fd, e;
 
-	if(mlibc::sys_openpt) {
-		e = mlibc::sys_openpt(flags, &fd);
+	if constexpr (mlibc::IsImplemented<Openpt>) {
+		e = mlibc::sysdep_or_enosys<Openpt>(flags, &fd);
 	} else {
-		e = mlibc::sys_open("/dev/ptmx", flags, 0, &fd);
+		e = mlibc::sysdep<Open>("/dev/ptmx", flags, 0, &fd);
 	}
 
 	if (e) {
@@ -509,9 +474,7 @@ int posix_openpt(int flags) {
 }
 
 int unlockpt(int fd) {
-	auto sysdep = MLIBC_CHECK_OR_ENOSYS(mlibc::sys_unlockpt, -1);
-
-	if(int e = sysdep(fd); e) {
+	if(int e = mlibc::sysdep_or_enosys<Unlockpt>(fd); e) {
 		errno = e;
 		return -1;
 	}
@@ -523,29 +486,90 @@ int grantpt(int) {
 	return 0;
 }
 
-double strtod_l(const char *__restrict__ nptr, char ** __restrict__ endptr, locale_t) {
-	mlibc::infoLogger() << "mlibc: strtod_l ignores locale!" << frg::endlog;
-	return strtod(nptr, endptr);
+double strtod_l(const char *__restrict__ nptr, char ** __restrict__ endptr, locale_t loc) {
+	return mlibc::strtofp<double>(nptr, endptr, static_cast<mlibc::localeinfo *>(loc));
 }
 
-long double strtold_l(const char *__restrict__, char ** __restrict__, locale_t) {
-	__ensure(!"Not implemented");
-	__builtin_unreachable();
+long double strtold_l(const char *__restrict__ nptr, char ** __restrict__ endptr, locale_t loc) {
+	return mlibc::strtofp<long double>(nptr, endptr, static_cast<mlibc::localeinfo *>(loc));
 }
 
-float strtof_l(const char *__restrict__ nptr, char **__restrict__ endptr, locale_t) {
-	mlibc::infoLogger() << "mlibc: strtof_l ignores locales" << frg::endlog;
-	return strtof(nptr, endptr);
+float strtof_l(const char *__restrict__ nptr, char **__restrict__ endptr, locale_t loc) {
+	return mlibc::strtofp<float>(nptr, endptr, static_cast<mlibc::localeinfo *>(loc));
 }
 
-int strcoll_l(const char *, const char *, locale_t) {
-	__ensure(!"Not implemented");
-	__builtin_unreachable();
+int strcoll_l(const char *a, const char *b, locale_t loc) {
+	const auto l = static_cast<const mlibc::localeinfo *>(loc);
+	return mlibc::strcoll<char>(a, b, l);
 }
 
-int getsubopt(char **__restrict__, char *const *__restrict__, char **__restrict__) {
-	__ensure(!"Not implemented");
-	__builtin_unreachable();
+size_t strxfrm_l(char *__restrict dest, const char *__restrict src, size_t n, locale_t loc) {
+	auto l = static_cast<mlibc::localeinfo *>(loc);
+
+	auto nrules = l->collate.get(_NL_COLLATE_NRULES).asUint32();
+	if (nrules == 0) {
+		size_t len = strlen(src);
+		if (n)
+			stpncpy(dest, src, frg::min(len + 1, n));
+		return len;
+	}
+
+	if (*src == '\0') {
+		if (n)
+			*dest = '\0';
+		return 0;
+	}
+
+	return do_xfrm(reinterpret_cast<const uint8_t *>(src), dest, n, mlibc::coll_context<char>::from_localeinfo(l));
+}
+
+int getsubopt(char **__restrict__ optionp, char *const *__restrict__ keylistp, char **__restrict__ valuep) {
+	*valuep = nullptr;
+
+	if (!optionp || !*optionp)
+		return -1;
+
+	char *s = *optionp;
+
+	// We diverge from glibc here as POSIX specifies that options should be tokens or tokens with
+	// values between commas; this implies that the empty string between two commas is not a token,
+	// and ignoring whitespace is sane behavior here. This seems to be in line with *BSD behavior.
+	for(; *s && (*s == ',' || *s == ' ' || *s == '\t'); s++);
+
+	if (!*s) {
+		*optionp = s;
+		return -1;
+	}
+
+	char *subopt = s;
+
+	for(; *++s && *s != ',' && *s != '=';);
+
+	if (*s) {
+		// If there's an equals sign, set the value pointer, and skip over the value part of the token.
+		// Terminate the token.
+
+		if (*s == '=') {
+			*s = '\0';
+			for (*valuep = ++s; *s && *s != ','; s++);
+
+			if (*s)
+				*s++ = '\0';
+		} else {
+			*s++ = '\0';
+		}
+
+		for (; *s && (*s == ',' || *s == ' ' || *s == '\t'); s++);
+	}
+
+	*optionp = s;
+
+	for (int cnt = 0; *keylistp; keylistp++, cnt++) {
+		if (!strcmp(subopt, *keylistp))
+			return cnt;
+	}
+
+	return -1;
 }
 
 char *secure_getenv(const char *name) {

@@ -4,6 +4,8 @@
 #include <limits.h>
 #include <bits/size_t.h>
 #include <frg/array.hpp>
+#include <frg/list.hpp>
+#include <mlibc/threads.hpp>
 
 #include "elf.hpp"
 
@@ -44,7 +46,7 @@ namespace {
 	constexpr unsigned int tcbCancelingBit = 1 << 3;
 	// Set when the thread is exiting.
 	constexpr unsigned int tcbExitingBit = 1 << 4;
-}
+} // namespace
 
 namespace mlibc {
 	// Returns true when bitmask indicates thread has been asynchronously
@@ -66,7 +68,7 @@ namespace mlibc {
 		return (value & tcbCancelEnableBit);
 	}
 
-	// Returns true when bitmask indicates threas has been cancelled.
+	// Returns true when bitmask indicates thread has been cancelled.
 	static constexpr bool tcb_cancelled(int value) {
 		return (value & (tcbCancelEnableBit | tcbCancelTriggerBit))
 		       == (tcbCancelEnableBit | tcbCancelTriggerBit);
@@ -79,7 +81,7 @@ namespace mlibc {
 	// Otherwise this will be set to true after RTLD has initialized the TCB.
 	extern bool tcb_available_flag;
 #endif
-}
+} // namespace mlibc
 
 enum class TcbThreadReturnValue {
 	Pointer,
@@ -98,10 +100,7 @@ struct Tcb {
 	uintptr_t stackCanary;
 	int cancelBits;
 
-	union {
-		void *voidPtr;
-		int intVal;
-	} returnValue;
+	mlibc::thread_exit_return returnValue;
 	TcbThreadReturnValue returnValueType;
 
 	struct AtforkHandler {
@@ -120,12 +119,19 @@ struct Tcb {
 		void (*func)(void *);
 		void *arg;
 
-		CleanupHandler *next;
-		CleanupHandler *prev;
+		frg::default_list_hook<CleanupHandler> hook_;
 	};
 
-	CleanupHandler *cleanupBegin;
-	CleanupHandler *cleanupEnd;
+	using CleanupHandlerList = frg::intrusive_list<
+		CleanupHandler,
+		frg::locate_member<
+			CleanupHandler,
+			frg::default_list_hook<CleanupHandler>,
+			&CleanupHandler::hook_
+		>
+	>;
+
+	CleanupHandlerList cleanupHandlers;
 	int isJoinable;
 
 	struct LocalKey {
@@ -138,13 +144,22 @@ struct Tcb {
 	void *stackAddr;
 	size_t guardSize;
 
+	struct CxaThreadExitHandler {
+		void (*function)(void *);
+		void *argument;
+		void *dsoSymbol;
+		CxaThreadExitHandler *next;
+	};
+
+	CxaThreadExitHandler *cxaThreadExitHandlers;
+
 	inline void invokeThreadFunc(void *entry, void *user_arg) {
 		if(returnValueType == TcbThreadReturnValue::Pointer) {
 			auto func = reinterpret_cast<void *(*)(void *)>(entry);
 			returnValue.voidPtr = func(user_arg);
 		} else {
 			auto func = reinterpret_cast<int (*)(void *)>(entry);
-			returnValue.intVal = func(user_arg);
+			returnValue.integer = func(user_arg);
 		}
 	}
 };
@@ -168,22 +183,22 @@ static_assert(offsetof(Tcb, cancelBits) == 0x18);
 #elif defined(__aarch64__)
 // The thread pointer on AArch64 points to 16 bytes before the end of the TCB.
 // options/linker/aarch64/runtime.S uses the offset of dtvPointers.
-static_assert(sizeof(Tcb) - offsetof(Tcb, dtvPointers) - TP_TCB_OFFSET == 104);
+static_assert(sizeof(Tcb) - offsetof(Tcb, dtvPointers) - TP_TCB_OFFSET == 112);
 // sysdeps/linux/aarch64/cp_syscall.S uses the offset of cancelBits.
-static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) - TP_TCB_OFFSET == 80);
+static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) - TP_TCB_OFFSET == 88);
 #elif defined(__riscv) && __riscv_xlen == 64
 // The thread pointer on RISC-V points to *after* the TCB, and since
 // we need to access specific fields that means that the value in
 // sysdeps/linux/riscv64/cp_syscall.S needs to be updated whenever
 // the struct is expanded.
-static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) == 96);
+static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) == 104);
 #elif defined (__m68k__)
 // The thread pointer on m68k points to 0x7000 bytes *after* the end of the
 // TCB, so similarly to as on RISC-V, we need to keep the value in
 // sysdeps/linux/m68k/cp_syscall.S up-to-date.
-static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) == 0x30);
+static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) == 0x34);
 #elif defined(__loongarch64)
-static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) == 96);
+static_assert(sizeof(Tcb) - offsetof(Tcb, cancelBits) == 104);
 #else
 #error "Missing architecture specific code."
 #endif

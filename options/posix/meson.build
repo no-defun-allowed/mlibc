@@ -16,6 +16,7 @@ libc_sources += files(
 	'generic/net-if.cpp',
 	'generic/poll.cpp',
 	'generic/posix_ctype.cpp',
+	'generic/posix_devctl.cpp',
 	'generic/posix-file-io.cpp',
 	'generic/posix_locale.cpp',
 	'generic/posix_signal.cpp',
@@ -54,9 +55,12 @@ libc_sources += files(
 	'generic/sys-sem.cpp',
 	'generic/sys-ipc.cpp',
 	'generic/time.cpp',
+	'generic/wchar.cpp',
 	'generic/wordexp.cpp',
 	'generic/mqueue.cpp',
 	'generic/utmpx.cpp',
+	'generic/monetary.cpp',
+	'generic/aio.cpp',
 )
 
 if not headers_only
@@ -70,13 +74,15 @@ if not headers_only
 		pic: true,
 		include_directories: libc_include_dirs,
 		dependencies: libc_deps,
-		c_args: ['-Wno-unused', '-Wno-implicit', '-Wno-parentheses', '-Wno-sign-compare', '-Wno-attributes', '-Wno-unknown-pragmas', '-Wno-implicit-fallthrough', '-Wno-unused-parameter']
+		c_args: mlibc_c_args + ['-Wno-unused', '-Wno-implicit', '-Wno-parentheses', '-Wno-sign-compare', '-Wno-attributes', '-Wno-unknown-pragmas', '-Wno-implicit-fallthrough', '-Wno-unused-parameter'],
+		link_args: mlibc_link_args,
 	)
 endif
 
 if not no_headers
 	install_headers(
 		'include/byteswap.h',
+		'include/devctl.h',
 		'include/dirent.h',
 		'include/dlfcn.h',
 		'include/fcntl.h',
@@ -105,6 +111,11 @@ if not no_headers
 		'include/semaphore.h',
 		'include/mqueue.h',
 		'include/utmpx.h',
+		'include/endian.h',
+		'include/tar.h',
+		'include/cpio.h',
+		'include/monetary.h',
+		'include/aio.h',
 	)
 	install_headers(
 		'include/arpa/inet.h',
@@ -166,10 +177,9 @@ if not no_headers
 		'include/bits/posix/posix_stdlib.h',
 		'include/bits/posix/posix_string.h',
 		'include/bits/posix/posix_time.h',
+		'include/bits/posix/posix_sys_time.h',
 		'include/bits/posix/posix_wctype.h',
 		'include/bits/posix/stat.h',
-		'include/bits/posix/timeval.h',
-		'include/bits/posix/fd_set.h',
 		'include/bits/posix/pthread_t.h',
 		'include/bits/posix/timer_t.h',
 		subdir: 'bits/posix'

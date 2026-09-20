@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <wchar.h>
 
 #define WRITE_NO 1024
 
@@ -10,6 +11,8 @@ int main() {
 
 	FILE *fp = open_memstream(&buf, &size);
 	assert(fp);
+
+	assert(fwide(fp, 0) < 0);
 
 	char c = 'A';
 	for (size_t i = 0; i < WRITE_NO; i++)
@@ -58,8 +61,38 @@ int main() {
 		assert(buf[i] == c);
 	assert(buf[size] == '\0');
 
-	// Close the file, we have tested everything.
+	// Close the file, we have tested everything for this one.
 	assert(!fclose(fp));
 	free(buf);
+
+	// Test that the buffer location is properly updated after a fflush()
+	buf = NULL;
+	size = 1234;
+
+	fp = open_memstream(&buf, &size);
+	assert(fp);
+
+	assert(fflush(fp) != EOF);
+
+	assert(buf);
+	assert(size == 0);
+
+	assert(!fclose(fp));
+	free(buf);
+
+	// Same but after a close
+	buf = NULL;
+	size = 1234;
+
+	fp = open_memstream(&buf, &size);
+	assert(fp);
+
+	assert(!fclose(fp));
+
+	assert(buf);
+	assert(size == 0);
+
+	free(buf);
+
 	return 0;
 }

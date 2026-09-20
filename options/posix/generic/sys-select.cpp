@@ -1,3 +1,5 @@
+#include <bit>
+#include <type_traits>
 
 #include <string.h>
 #include <sys/select.h>
@@ -6,20 +8,25 @@
 
 #include <bits/ensure.h>
 #include <mlibc-config.h>
+#include <mlibc/all-sysdeps.hpp>
 
-#include <mlibc/posix-sysdeps.hpp>
+using fd_mask_unsigned = std::make_unsigned_t<__fd_mask>;
+
+static_assert(std::has_single_bit((unsigned int)NFDBITS));
+
+#define FD_MASK(n) (fd_mask_unsigned)(fd_mask_unsigned{1} << (n))
 
 void __FD_CLR(int fd, fd_set *set) {
-	__ensure(fd < FD_SETSIZE);
-	set->fds_bits[fd / 8] &= ~(1 << (fd % 8));
+	__ensure(fd >= 0 && fd < FD_SETSIZE);
+	set->fds_bits[fd / NFDBITS] = static_cast<fd_mask>(static_cast<fd_mask_unsigned>(set->fds_bits[fd / NFDBITS]) & ~FD_MASK(fd & (NFDBITS-1)));
 }
 int __FD_ISSET(int fd, fd_set *set) {
-	__ensure(fd < FD_SETSIZE);
-	return set->fds_bits[fd / 8] & (1 << (fd % 8));
+	__ensure(fd >= 0 && fd < FD_SETSIZE);
+	return (static_cast<fd_mask_unsigned>(set->fds_bits[fd / NFDBITS]) & FD_MASK(fd & (NFDBITS-1))) != 0;
 }
 void __FD_SET(int fd, fd_set *set) {
-	__ensure(fd < FD_SETSIZE);
-	set->fds_bits[fd / 8] |= 1 << (fd % 8);
+	__ensure(fd >= 0 && fd < FD_SETSIZE);
+	set->fds_bits[fd / NFDBITS] = static_cast<fd_mask>(static_cast<fd_mask_unsigned>(set->fds_bits[fd / NFDBITS]) | FD_MASK(fd & (NFDBITS-1)));
 }
 void __FD_ZERO(fd_set *set) {
 	memset(set->fds_bits, 0, sizeof(fd_set));
@@ -36,8 +43,7 @@ int select(int num_fds, fd_set *__restrict read_set, fd_set *__restrict write_se
 		timeout_ptr = &timeouts;
 	}
 
-    MLIBC_CHECK_OR_ENOSYS(mlibc::sys_pselect, -1);
-	if(int e = mlibc::sys_pselect(num_fds, read_set, write_set, except_set,
+	if(int e = mlibc::sysdep_or_enosys<Pselect>(num_fds, read_set, write_set, except_set,
 				timeout_ptr, nullptr, &num_events); e) {
 		errno = e;
 		return -1;
@@ -48,8 +54,7 @@ int select(int num_fds, fd_set *__restrict read_set, fd_set *__restrict write_se
 int pselect(int num_fds, fd_set *__restrict read_set, fd_set *__restrict write_set,
 		fd_set *__restrict except_set, const struct timespec *timeout, const sigset_t *sigmask) {
 	int num_events = 0;
-	MLIBC_CHECK_OR_ENOSYS(mlibc::sys_pselect, -1);
-	if(int e = mlibc::sys_pselect(num_fds, read_set, write_set, except_set,
+	if(int e = mlibc::sysdep_or_enosys<Pselect>(num_fds, read_set, write_set, except_set,
 				timeout, sigmask, &num_events); e) {
 		errno = e;
 		return -1;

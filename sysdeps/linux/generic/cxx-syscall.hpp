@@ -45,6 +45,9 @@ namespace mlibc {
 		return __do_syscall6(sc, arg1, arg2, arg3, arg4, arg5, arg6);
 	}
 
+	inline sc_word_t do_nargs_cp_syscall(int sc) {
+		return __mlibc_do_asm_cp_syscall(sc, 0, 0, 0, 0, 0, 0);
+	}
 	inline sc_word_t do_nargs_cp_syscall(int sc, sc_word_t arg1) {
 		return __mlibc_do_asm_cp_syscall(sc, arg1, 0, 0, 0, 0, 0);
 	}
@@ -92,7 +95,7 @@ namespace mlibc {
 #if __MLIBC_POSIX_OPTION && !MLIBC_BUILDING_RTLD
 		auto result = static_cast<sc_result_t>(do_nargs_cp_syscall(sc, sc_cast(args)...));
 		if (int e = sc_error(result); e) {
-			auto tcb = reinterpret_cast<Tcb*>(get_current_tcb());
+			auto tcb = get_current_tcb();
 			if (tcb_cancelled(tcb->cancelBits) && e == EINTR) {
 				__mlibc_do_cancel();
 				__builtin_unreachable();

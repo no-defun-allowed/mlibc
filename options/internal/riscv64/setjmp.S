@@ -1,9 +1,9 @@
-.global setjmp
-.type setjmp, "function"
-.global _setjmp
-.type _setjmp, "function"
-setjmp:
-_setjmp:
+#include "mlibc-asm/helpers.h"
+#include "mlibc-asm/jmp_buf.h"
+
+.hidden __setjmp
+.type __setjmp, "function"
+__setjmp:
 	sd ra, 0(a0)
 	sd s0, 8(a0)
 	sd s1, 16(a0)
@@ -30,13 +30,29 @@ _setjmp:
 	fsd fs9, 184(a0)
 	fsd fs10, 192(a0)
 	fsd fs11, 200(a0)
+	bne a2, zero, 1f
+	sw zero, JMP_BUF_SAVESIGS_OFFSET(a0)
 	li a0, 0
 	ret
+
+1:
+	tail __sigsetjmp
+
+.global setjmp
+.type setjmp, "function"
+.global _setjmp
+.type _setjmp, "function"
+setjmp:
+_setjmp:
+	li a1, 0
+	li a2, 0
+	tail __setjmp
 
 .global sigsetjmp
 .type sigsetjmp, "function"
 sigsetjmp:
-	unimp // TODO
+	li a2, 1
+	tail __setjmp
 
 .global longjmp
 .type longjmp, "function"
@@ -73,5 +89,5 @@ _longjmp:
 	seqz a0,a1
 	add a0,a0,a1
 	ret
-.section .note.GNU-stack,"",%progbits
 
+GNU_STACK_NOTE()

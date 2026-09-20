@@ -37,6 +37,7 @@ enum class LinkerError {
 };
 
 uint32_t elf64Hash(frg::string_view string);
+uint32_t gnuHash(frg::string_view string);
 
 // --------------------------------------------------------
 // ObjectRepository
@@ -76,6 +77,9 @@ struct ObjectRepository {
 	SharedObject *findCaller(void *address);
 
 	SharedObject *findLoadedObject(frg::string_view name);
+
+	// Finds a loaded object by the device/inode of its backing file.
+	SharedObject *findObjectByFileId(dev_t dev, ino_t ino);
 
 	void addObjectToDestructQueue(SharedObject *object);
 	void destructObjects();
@@ -118,6 +122,11 @@ enum class HashStyle {
 	gnu
 };
 
+struct SystemVHashTableHeader {
+	uint32_t nBuckets;
+	uint32_t nChain;
+};
+
 struct GnuHashTableHeader {
 	uint32_t nBuckets;
 	uint32_t symbolOffset;
@@ -156,6 +165,11 @@ struct SharedObject {
 	frg::string<MemoryAllocator> path;
 	frg::string<MemoryAllocator> interpreterPath;
 	const char *soName;
+
+	dev_t fileDev = 0;
+	ino_t fileIno = 0;
+	bool hasFileId = false;
+
 	bool isMainObject;
 	uint64_t objectRts;
 
@@ -339,8 +353,12 @@ struct RuntimeTlsMap {
 
 	// TLS indices.
 	frg::vector<SharedObject *, MemoryAllocator> indices;
+
+	// Track all allocated TCBs.
+	frg::vector<Tcb *, MemoryAllocator> tcbs;
 };
 
+extern frg::manual_box<FutexLock> runtimeTlsMapLock;
 extern frg::manual_box<RuntimeTlsMap> runtimeTlsMap;
 
 Tcb *allocateTcb();
@@ -490,7 +508,8 @@ public:
 
 private:
 	void _buildLinkBfs(SharedObject *root);
-	void _buildTlsMaps();
+	size_t _buildTlsMaps();
+	void _publishTlsMaps(size_t previousSize);
 
 	void _processStaticRelocations(SharedObject *object);
 	void _processLazyRelocations(SharedObject *object);

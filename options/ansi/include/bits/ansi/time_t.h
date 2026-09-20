@@ -1,8 +1,10 @@
 
-#ifndef MLIBC_TIME_T
-#define MLIBC_TIME_T
+#ifndef _MLIBC_ANSI_TIME_T
+#define _MLIBC_ANSI_TIME_T
 
-typedef long time_t;
+#include <bits/types.h>
 
-#endif
+typedef __mlibc_int64 time_t;
+
+#endif /* _MLIBC_ANSI_TIME_T */
 

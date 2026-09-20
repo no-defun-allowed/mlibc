@@ -31,7 +31,7 @@ inline int operator|(managarm::fs::Errors e, ToErrno) {
 		case managarm::fs::Errors::BROKEN_PIPE:
 			return EPIPE;
 		case managarm::fs::Errors::ACCESS_DENIED:
-			return EPERM;
+			return EACCES;
 		case managarm::fs::Errors::NOT_DIRECTORY:
 			return ENOTDIR;
 		case managarm::fs::Errors::AF_NOT_SUPPORTED:
@@ -84,6 +84,10 @@ inline int operator|(managarm::fs::Errors e, ToErrno) {
 			return ENAMETOOLONG;
 		case managarm::fs::Errors::NO_FILE_DESCRIPTORS_AVAILABLE:
 			return EMFILE;
+		case managarm::fs::Errors::NOT_SUPPORTED:
+			return ENOTSUP;
+		case managarm::fs::Errors::BAD_FILE_DESCRIPTOR:
+			return EBADF;
 	}
 
 	mlibc::panicLogger() << "unhandled managarm::fs::Errors " << static_cast<int32_t>(e)
@@ -104,7 +108,7 @@ inline int operator|(managarm::posix::Errors e, ToErrno) {
 		case managarm::posix::Errors::BROKEN_PIPE:
 			return EPIPE;
 		case managarm::posix::Errors::ACCESS_DENIED:
-			return EPERM;
+			return EACCES;
 		case managarm::posix::Errors::NOT_A_DIRECTORY:
 			return ENOTDIR;
 		case managarm::posix::Errors::INSUFFICIENT_PERMISSION:
@@ -159,6 +163,8 @@ inline int operator|(managarm::posix::Errors e, ToErrno) {
 			return EMFILE;
 		case managarm::posix::Errors::INTERRUPTED:
 			return EINTR;
+		case managarm::posix::Errors::CROSS_DEVICE_LINK:
+			return EXDEV;
 	}
 
 	mlibc::panicLogger() << "unhandled managarm::posix::Errors " << static_cast<int32_t>(e)

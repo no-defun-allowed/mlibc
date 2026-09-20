@@ -73,6 +73,9 @@ int ffsll(long long i) {
 }
 
 int strcasecmp(const char *a, const char *b) {
+	if (a == b)
+		return 0;
+
 	size_t i = 0;
 	while(true) {
 		unsigned char a_byte = tolower(a[i]);
@@ -88,8 +91,31 @@ int strcasecmp(const char *a, const char *b) {
 	}
 }
 
+int strcasecmp_l(const char *a, const char *b, locale_t locale) {
+	if (a == b)
+		return 0;
+
+	size_t i = 0;
+	while(true) {
+		unsigned char a_byte = tolower_l(a[i], locale);
+		unsigned char b_byte = tolower_l(b[i], locale);
+		if(!a_byte && !b_byte)
+			return 0;
+		// If only one char is null, one of the following cases applies.
+		if(a_byte < b_byte)
+			return -1;
+		if(a_byte > b_byte)
+			return 1;
+		i++;
+	}
+}
+
 int strncasecmp(const char *a, const char *b, size_t size) {
 	return mlibc::strncasecmp(a, b, size);
+}
+
+int strncasecmp_l(const char *a, const char *b, size_t size, locale_t locale) {
+	return mlibc::strncasecmp(a, b, size, static_cast<mlibc::localeinfo *>(locale));
 }
 
 // Marked as obsolete in posix 2008 but used by at least tracker
@@ -104,10 +130,3 @@ void bcopy(const void *s1, void *s2, size_t n) {
 void bzero(void *s, size_t n) {
 	memset(s, 0, n);
 }
-
-void explicit_bzero(void *s, size_t len) {
-  memset (s, 0, len);
-  // Compiler barrier to prevent optimizing away the memset
-  asm volatile ("" ::: "memory");
-}
-

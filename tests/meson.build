@@ -11,19 +11,21 @@ all_test_cases = [
 	'ansi/abs',
 	'ansi/longjmp',
 	'ansi/mbrtoc32',
-	'ansi/strverscmp',
 	'ansi/strftime',
 	'ansi/strchr',
 	'ansi/strrchr',
 	'ansi/wcsrtombs',
+	'ansi/mbsrtowcs',
+	'ansi/mbsnrtowcs',
+	'ansi/wcsnrtombs',
+	'ansi/mblen',
+	'ansi/mbrlen',
 	'ansi/wmemcmp',
 	'ansi/timegm',
 	'ansi/tz',
 	'ansi/ungetc',
-	'ansi/wcsdup',
-	'ansi/wcsncasecmp',
 	'ansi/fopen',
-	'ansi/memmem',
+	'ansi/init-fini-order',
 	'ansi/creal-cimag',
 	'ansi/fenv',
 	'ansi/qsort',
@@ -33,11 +35,38 @@ all_test_cases = [
 	'ansi/fgetpos',
 	'ansi/fputs',
 	'ansi/ftell',
+	'ansi/fseek-eof',
+	'ansi/tmpfile',
+	'ansi/mbstowcs',
+	'ansi/locale',
+	'ansi/asctime',
+	'ansi/wcstof',
+	'ansi/fputwc',
+	'ansi/mbrtowc',
+	'ansi/ungetwc',
+	'ansi/fgetws',
+	'ansi/swscanf',
+	'ansi/fwscanf',
+	'ansi/swprintf',
+	'ansi/wcsftime',
+	'ansi/wctype',
+	'ansi/wctrans',
+	'ansi/nanosleep',
+	'ansi/btowc',
+	'ansi/wctob',
+	'ansi/strcmp',
+	'ansi/threads-mtx',
+	'ansi/threads-cnd',
+	'ansi/threads-once',
+	'ansi/threads-tss',
+	'ansi/threads-thrd',
+	'ansi/string-search',
 	'bsd/ns_get_put',
 	'bsd/reallocarray',
 	'bsd/strl',
 	'bsd/sbrk',
 	'bsd/getloadavg',
+	'posix/sched_setscheduler',
 	'posix/inet_ntop',
 	'posix/inet_pton',
 	'posix/access',
@@ -52,14 +81,17 @@ all_test_cases = [
 	'posix/pthread_mutex',
 	'posix/pthread_key',
 	'posix/pthread_thread_local',
+	'posix/cxa_thread_atexit',
 	'posix/pthread_attr',
 	'posix/pthread_schedparam',
+	'posix/pthread_spin',
 	'posix/pwd',
 	'posix/fdopen',
 	'posix/fopencookie',
 	'posix/fmemopen',
 	'posix/getaddrinfo',
 	'posix/getdelim',
+	'posix/gethostbyname',
 	'posix/getnameinfo',
 	'posix/getparam',
 	'posix/getservbyname',
@@ -85,6 +117,7 @@ all_test_cases = [
 	'posix/wordexp',
 	'posix/rlimits',
 	'posix/accept4',
+	'posix/cmsg',
 	'posix/setpriority',
 	'posix/nice',
 	'posix/alarm',
@@ -96,6 +129,7 @@ all_test_cases = [
 	'posix/flockfile',
 	'posix/basename',
 	'posix/regex',
+	'posix/regex-highbyte',
 	'posix/sigtimedwait',
 	'posix/if_indextoname',
 	'posix/readv-writev',
@@ -104,8 +138,42 @@ all_test_cases = [
 	'posix/mkstemp',
 	'posix/waitid',
 	'posix/usershell',
-	'posix/shm',
+	'posix/sysv_shm',
+	'posix/sysv_msg',
+	'posix/sysv_sem',
 	'posix/swab',
+	'posix/select',
+	'posix/wcsdup',
+	'posix/wcsncasecmp',
+	'posix/getsubopt',
+	'posix/pthread_rwlock_timedrdlock',
+	'posix/pthread_rwlock_timedwrlock',
+	'posix/sigsetjmp',
+	'posix/locale',
+	'posix/jrand48',
+	'posix/sigqueue',
+	'posix/memccpy',
+	'posix/strfmon',
+	'posix/sig2str',
+	'posix/getlogin_r',
+	'posix/inet_aton',
+	'posix/pthread_cond_signal',
+	'posix/protoent',
+	'posix/lfind',
+	'posix/lsearch',
+	'posix/nftw',
+	'posix/wcslcat',
+	'posix/wcslcpy',
+	'posix/wcpcpy',
+	'posix/wcpncpy',
+	'posix/getwchar',
+	'posix/strcoll_l',
+	'posix/strxfrm_l',
+	'posix/strtok',
+	'posix/wcscoll_l',
+	'posix/wcsxfrm_l',
+	'posix/aio',
+	'posix/if_nameindex',
 	'glibc/getopt',
 	'glibc/ffsl-ffsll',
 	'glibc/error_message_count',
@@ -116,6 +184,11 @@ all_test_cases = [
 	'glibc/error_at_line',
 	'glibc/getgrouplist',
 	'glibc/rpmatch',
+	'glibc/strverscmp',
+	'glibc/memmem',
+	'glibc/stdio_ext',
+	'glibc/_dl_find_object',
+	'glibc/shadow',
 	'linux/xattr',
 	'linux/pthread_setname_np',
 	'linux/pthread_attr',
@@ -127,6 +200,9 @@ all_test_cases = [
 	'linux/ppoll',
 	'linux/utmp',
 	'linux/utmpx',
+	'linux/SIOCGSTAMP',
+	'linux-wrappers/rt_tgsigqueueinfo',
+	'linux-wrappers/rt_sigqueueinfo',
 ]
 
 if host_machine.system() == 'linux'
@@ -155,18 +231,30 @@ host_libc_excluded_test_cases = [
 	'glibc/error', # These tests depend on mlibc error messages.
 	'glibc/error_at_line', # These tests depend on mlibc error messages.
 	'rtld/search-order', # See rtld/search-order/meson.build.
+	'rtld/fail-load', # glibc gives non-deterministic errors
 ]
 host_libc_noasan_test_cases = [
 	'posix/pthread_cancel',
 	'posix/pthread_attr', # does some stack overflowing to check stack size
 	'posix/posix_memalign',
 	'posix/search', # requires tdelete (#351)
+	'posix/locale', # encounters memory leaks
 	'ansi/calloc', # does some overflowing
 	'linux/pthread_attr', # encounters memory leaks
+	'posix/strcoll_l', # glibc leaks memory internally
+	'posix/wcscoll_l', # glibc leaks memory internally
+	'posix/strxfrm_l', # glibc leaks memory internally
+	'posix/wcsxfrm_l', # glibc leaks memory internally
+]
+
+cross_libc_excluded_test_cases = [
+	'ansi/fenv',
+	'posix/pthread_cancel',
 ]
 
 extra_cflags_test_cases = {
 	'ansi/calloc': ['-Wno-alloc-size-larger-than'],
+	'ansi/strcmp': ['-Wno-stringop-overflow'],
 }
 
 test_sources = []
@@ -185,6 +273,19 @@ if c_compiler.get_id() == 'gcc'
 elif c_compiler.get_id() == 'clang'
 	test_c_args += ['-Wno-unknown-warning-option']
 	host_test_c_args += ['-Wno-unknown-warning-option']
+endif
+
+host_test_locpath = get_option('host_test_locpath')
+cross_test_locpath = get_option('cross_test_locpath')
+
+host_env = []
+if host_test_locpath != ''
+	host_env += ['LOCPATH=' + host_test_locpath]
+endif
+
+cross_env = []
+if cross_test_locpath != ''
+	cross_env += ['LOCPATH=' + cross_test_locpath]
 endif
 
 # Our ubsan implementation can't be used by the tests themselves,
@@ -275,6 +376,14 @@ foreach test_name : all_test_cases
 		continue
 	elif test_subdir == 'linux' and not linux_option
 		continue
+	elif test_subdir == 'linux-wrappers' and not linux_wrappers_option
+		continue
+	endif
+
+	if test_name in extra_cflags_test_cases
+		extra_cflags = extra_cflags_test_cases[test_name]
+	else
+		extra_cflags = []
 	endif
 
 	should_fail = fail_test_cases.contains(test_name)
@@ -283,8 +392,8 @@ foreach test_name : all_test_cases
 		objects: test_objects,
 		build_rpath: meson.global_build_root(),
 		override_options: test_override_options,
-		c_args: test_c_args,
-		link_args: test_link_args,
+		c_args: mlibc_c_args + test_c_args + extra_cflags,
+		link_args: mlibc_link_args + test_link_args,
 		pie: use_pie,
 	)
 
@@ -298,9 +407,10 @@ foreach test_name : all_test_cases
 				exec
 			],
 			timeout: timeout_sec,
+			env: cross_env,
 		)
 	else
-		test(test_short_name, exec, suite: test_subdir, should_fail: should_fail, timeout: timeout_sec)
+		test(test_short_name, exec, suite: test_subdir, should_fail: should_fail, timeout: timeout_sec, env: cross_env)
 	endif
 
 	if build_tests_host_libc and not host_libc_excluded_test_cases.contains(test_name)
@@ -310,16 +420,10 @@ foreach test_name : all_test_cases
 			host_libc_sanitize_options = 'b_sanitize=address,undefined'
 		endif
 
-		if test_name in extra_cflags_test_cases
-			extra_cflags = extra_cflags_test_cases[test_name]
-		else
-			extra_cflags = []
-		endif
-
 		exec = executable('host-libc-' + test_exec_name, test_name + '.c',
 			build_rpath: meson.global_build_root(),
 			override_options: host_libc_sanitize_options,
-			c_args: [host_test_c_args + '-D_GNU_SOURCE', '-DUSE_HOST_LIBC', '-pthread', extra_cflags],
+			c_args: [host_test_c_args + '-D_GNU_SOURCE', '-DUSE_HOST_LIBC', '-pthread', '-fno-builtin', extra_cflags],
 			link_args: ['-lresolv', '-ldl', '-pthread', '-lm', '-lrt'],
 			native: true,
 		)
@@ -330,13 +434,33 @@ foreach test_name : all_test_cases
 				suite: ['host-libc', test_subdir],
 				should_fail: should_fail,
 				args: [
-					meson.source_root() + '/tests/' + test_name + '.py',
+					meson.project_source_root() + '/tests/' + test_name + '.py',
 					exec
 				],
 				timeout: timeout_sec,
+				env: host_env,
 			)
 		else
-			test(test_short_name, exec, suite: ['host-libc', test_subdir], should_fail: should_fail, timeout: timeout_sec)
+			test(test_short_name, exec, suite: ['host-libc', test_subdir], should_fail: should_fail, timeout: timeout_sec, env: host_env)
+		endif
+	endif
+
+	if build_tests_cross_libc and not cross_libc_excluded_test_cases.contains(test_name)
+		exec = executable('cross-libc-' + test_exec_name, test_name + '.c',
+			build_rpath: meson.global_build_root(),
+			override_options: test_override_options,
+			c_args: ['-D_GNU_SOURCE', '-DUSE_CROSS_LIBC', '-pthread', '-fno-builtin', extra_cflags],
+			link_args: ['-lresolv', '-ldl', '-pthread', '-lm', '-lrt'],
+		)
+
+		# TODO: handle wrapped tests
+		if not wrapped_test_cases.contains(test_name)
+			test(test_short_name, exec,
+				suite: ['cross-libc', test_subdir],
+				should_fail: should_fail,
+				timeout: timeout_sec,
+				env: ['QEMU_LD_PREFIX=' + cross_libc_ld_prefix] + cross_env
+			)
 		endif
 	endif
 endforeach

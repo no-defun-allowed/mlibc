@@ -1,3 +1,4 @@
+#include <locale.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,9 +29,11 @@ struct format_test_cases {
 	{"%u", "0420", 420, T_UINT, 1},
 	{"%o", "0420", 0420, T_UINT, 1},
 	{"%x", "0xCB7", 0xCB7, T_UINT, 1},
-#ifndef USE_HOST_LIBC
+#if !defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)
 	{"%b", "0b1011", 0b1011, T_UINT, 1},
 	{"%b", "0B1011", 0b1011, T_UINT, 1},
+	{"%b", "+0b1011", 0b1011, T_UINT, 1},
+	{"%b", "-0b1011", -0b1011, T_UINT, 1},
 #endif
 	{"%%", "%", 0, T_NONE, 0},
 	{"%c", "         I am not a fan of this solution.", ' ', T_CHAR, 1},
@@ -77,6 +80,9 @@ static void test_matrix() {
 }
 
 int main() {
+	const char *ret = setlocale(LC_ALL, "C");
+	assert(ret && *ret);
+
 	{
 		int x = 0;
 		char buf[] = "12345";
@@ -163,6 +169,17 @@ int main() {
 		free(str);
 	}
 
+	{
+		// From openjdk
+		char buf[] = "SomeOption=someValue";
+		char name[256];
+		char punct;
+		int ret = sscanf(buf, "%255[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]%c", name, &punct);
+		assert(ret == 2);
+		assert(punct == '=');
+		assert(!strcmp(name, "SomeOption"));
+	}
+
 	test_matrix();
 
 #pragma GCC diagnostic push
@@ -175,8 +192,8 @@ int main() {
 	assert(sscanf("ab", "abcd") == EOF);
 	assert(sscanf("abab", "abcd") == 0);
 
-	char char_value[8];
-	wchar_t wchar_value[8];
+	char char_value[16];
+	wchar_t wchar_value[16];
 
 	assert(sscanf("a", "%c", char_value) == 1);
 	assert(char_value[0] == 'a');
@@ -377,6 +394,32 @@ int main() {
 	assert(int_value == 0x1234);
 	assert(sscanf(" -0x1234", "%x", &int_value) == 1);
 	assert(int_value == -0x1234);
+	assert(sscanf("0", "%x", &int_value) == 1);
+	assert(int_value == 0);
+	assert(sscanf("01337", "%x", &int_value) == 1);
+	assert(int_value == 0x1337);
+	assert(sscanf("00xc0ffee", "%x", &int_value) == 1);
+	assert(int_value == 0);
+
+	assert(sscanf("1234ab", "%2x", &int_value) == 1);
+	assert(int_value == 0x12);
+	assert(sscanf("-1234ab", "%3x", &int_value) == 1);
+	assert(int_value == -0x12);
+	assert(sscanf("+1234ab", "%3x", &int_value) == 1);
+	assert(int_value == 0x12);
+	assert(sscanf("0x1234", "%4x", &int_value) == 1);
+	assert(int_value == 0x12);
+	assert(sscanf("0x1234", "%3x", &int_value) == 1);
+	assert(int_value == 0x1);
+	assert(sscanf("-0x1234", "%4x", &int_value) == 1);
+	assert(int_value == -0x1);
+
+#if (!defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)) || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 43)
+	// glibc before 2.42 or 2.43 did not handle prefixes with no following digits correctly
+	assert(sscanf("0x12", "%2x", &int_value) == 0);
+	assert(sscanf("-0x1234", "%3x", &int_value) == 0);
+	assert(sscanf("0xg", "%x%c", &uint_value, char_value) == 0);
+#endif
 
 	assert(sscanf("abc", "abc%n", &int_value) == 0);
 	assert(int_value == 3);
@@ -401,10 +444,7 @@ int main() {
 	float float_value;
 	double double_value;
 	long double long_double_value;
-	(void)float_value;
-	(void)double_value;
-	(void)long_double_value;
-	/*assert(sscanf("1.123", "%a", &float_value) == 1);
+	assert(sscanf("1.123", "%a", &float_value) == 1);
 	assert(float_value >= 1.123f - 0.01 && float_value <= 1.123f + 0.01);
 	assert(sscanf("1.123", "%la", &double_value) == 1);
 	assert(double_value >= 1.123 - 0.01 && double_value <= 1.123 + 0.01);
@@ -454,6 +494,8 @@ int main() {
 	assert(float_value >= 0x1.ABCDP3 - 0.01 && float_value <= 0x1.ABCDP3 + 0.01);
 	assert(sscanf("0x1.abcdP+3", "%f", &float_value) == 1);
 	assert(float_value >= 0x1.ABCDP3 - 0.01 && float_value <= 0x1.ABCDP3 + 0.01);
+	assert(sscanf("0x1.81c8P+13", "%f", &float_value) == 1);
+	assert(float_value >= 12345.0 - 0.01 && float_value <= 12345.0 + 0.01);
 	assert(sscanf("0x1.abcdP-3", "%f", &float_value) == 1);
 	assert(float_value >= 0x1.ABCDP-3 - 0.01 && float_value <= 0x1.ABCDP-3 + 0.01);
 	assert(sscanf("0x1.AbCdP-3", "%f", &float_value) == 1);
@@ -465,27 +507,34 @@ int main() {
 	assert(sscanf("+inf", "%f", &float_value) == 1);
 	assert(isinf(float_value));
 	assert(sscanf("-inf", "%f", &float_value) == 1);
-	assert(isinf(float_value));
+	assert(isinf(float_value) && __builtin_signbit(float_value));
 	assert(sscanf("INF", "%f", &float_value) == 1);
 	assert(isinf(float_value));
 	assert(sscanf("infinity", "%f", &float_value) == 1);
 	assert(isinf(float_value));
 	assert(sscanf("INFINITY", "%f", &float_value) == 1);
 	assert(isinf(float_value));
+	assert(sscanf("-infe", "%f", &float_value) == 1);
+	assert(isinf(float_value) && __builtin_signbit(float_value));
 	assert(sscanf("nan", "%f", &float_value) == 1);
 	assert(isnan(float_value));
 	assert(sscanf("NaN", "%f", &float_value) == 1);
 	assert(isnan(float_value));
+	assert(sscanf("naP", "%f", &float_value) == 0);
 	assert(sscanf("+nan", "%f", &float_value) == 1);
 	assert(isnan(float_value));
 	assert(sscanf("-nan", "%f", &float_value) == 1);
 	assert(isnan(float_value));
+	assert(sscanf("-nan", "%Lf", &long_double_value) == 1);
+	assert(isnan(long_double_value));
 	assert(sscanf("0xhello", "%f", &float_value) == 0);
 	assert(sscanf("0x1hello", "%f", &float_value) == 1);
 	assert(float_value >= 0x1P0f - 0.01 && float_value <= 0x1P0f + 0.01);
 	assert(sscanf("ab1.1234", "%f", &float_value) == 0);
 	assert(sscanf("  1.123", "%f", &float_value) == 1);
-	assert(float_value >= 1.123f - 0.01 && float_value <= 1.123f + 0.01);*/
+	assert(float_value >= 1.123f - 0.01 && float_value <= 1.123f + 0.01);
+	assert(sscanf(".1", "%f", &float_value) == 1);
+	assert(float_value >= .1f - 0.01 && float_value <= .1f + 0.01);
 
 	void* ptr;
 	assert(sscanf("hello", "%p", &ptr) == 0);
@@ -496,6 +545,7 @@ int main() {
 	assert(sscanf("0xabcdef12", "%p", &ptr) == 1);
 	assert(ptr == (void*)0xabcdef12);
 #endif
+	assert(sscanf("0x123", "%*p") == 0);
 
 	assert(sscanf("a", "%*c") == 0);
 	char_value[2] = 'q';
@@ -511,6 +561,43 @@ int main() {
 
 	assert(sscanf("aacd", "%2[ac]", char_value) == 1);
 	assert(strcmp(char_value, "aa") == 0);
+
+	assert(sscanf("zz-zxx-mmm", "%7[zx-]", char_value) == 1);
+	assert(strcmp(char_value, "zz-zxx-") == 0);
+
+	if (!setlocale(LC_ALL, "de_DE.utf8")) {
+		puts("setlocale(de_DE.utf8) failed!");
+		exit(1);
+	}
+
+	assert(sscanf("12,34", "%d", &int_value) == 1);
+	assert(int_value == 12);
+	assert(sscanf("12,34", "%f", &float_value) == 1);
+	// assert(float_value >= 12.34 - 0.01 && float_value <= 12.34 + 0.01);
+
+	assert(sscanf("αβγδ123", "%[α-ω]", char_value) == 1);
+	fprintf(stderr, "'%s'\n", char_value);
+	assert(!strcmp("αβγδ", char_value));
+
+	assert(sscanf("αβγδ123", "%l[α-ω]", wchar_value) == 1);
+	assert(!wcscmp(L"αβγδ", wchar_value));
+
+	// implementation-defined behavior, and glibc returns zero
+#if !defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)
+	assert(sscanf("αβγδ123", "%l[^δ-ω]", wchar_value) == 1);
+	assert(!wcscmp(L"αβγ", wchar_value));
+#endif
+
+	assert(sscanf("α-β-γ-δ-123", "%l[α-ω-]", wchar_value) == 1);
+	assert(!wcscmp(L"α-β-γ-δ-", wchar_value));
+
+	// implementation-defined behavior, and glibc returns zero
+#if !defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)
+	assert(sscanf("α-β-γ-δ-123", "%l[^δ-ω-]", wchar_value) == 1);
+	assert(!wcscmp(L"α", wchar_value));
+#endif
+
+	assert(sscanf("123", "%l[a-z]", wchar_value) == 0);
 
 	return 0;
 }

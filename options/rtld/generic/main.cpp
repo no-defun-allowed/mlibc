@@ -4,10 +4,13 @@
 
 #include <frg/manual_box.hpp>
 #include <frg/small_vector.hpp>
+#include <frg/optional.hpp>
+#include <frg/string.hpp>
 
 #include <abi-bits/auxv.h>
+#include <mlibc/all-sysdeps.hpp>
 #include <mlibc/debug.hpp>
-#include <mlibc/rtld-sysdeps.hpp>
+#include <mlibc/dlapi.hpp>
 #include <mlibc/rtld-config.hpp>
 #include <mlibc/rtld-abi.hpp>
 #include <mlibc/stack_protector.hpp>
@@ -24,10 +27,6 @@
 #define HIDDEN  __attribute__((__visibility__("hidden")))
 #define EXPORT  __attribute__((__visibility__("default")))
 
-static constexpr bool logEntryExit = false;
-static constexpr bool logStartup = false;
-static constexpr bool logDlCalls = false;
-
 #ifndef MLIBC_STATIC_BUILD
 extern HIDDEN void *_GLOBAL_OFFSET_TABLE_[];
 extern HIDDEN elf_dyn _DYNAMIC[];
@@ -38,9 +37,14 @@ namespace mlibc {
 	bool tcb_available_flag = false;
 } // namespace mlibc
 
-mlibc::RtldConfig rtldConfig;
-
-bool ldShowAuxv = false;
+mlibc::RtldConfig rtldConfig = {
+	// set automatically when AT_SECURE is passed by the kernel
+	// disables LD_LIBRARY_PATH and LD_PRELOAD
+	.secureRequired = false,
+	// set to enable rtld logging, also can be enabled by environment variables:
+	.debug = false, // MLIBC_RTLD_DEBUG=1
+	.debugVerbose = false // MLIBC_RTLD_DEBUG_VERBOSE=1
+};
 
 uintptr_t *entryStack;
 static constinit Tcb earlyTcb{};
@@ -48,6 +52,7 @@ frg::manual_box<ObjectRepository> initialRepository;
 frg::manual_box<Scope> globalScope;
 
 frg::manual_box<RuntimeTlsMap> runtimeTlsMap;
+frg::manual_box<FutexLock> runtimeTlsMapLock;
 
 // We use a small vector to avoid memory allocation for the default library paths
 frg::manual_box<frg::small_vector<frg::string_view, MLIBC_NUM_DEFAULT_LIBRARY_PATHS, MemoryAllocator>> libraryPaths;
@@ -55,6 +60,7 @@ frg::manual_box<frg::small_vector<frg::string_view, MLIBC_NUM_DEFAULT_LIBRARY_PA
 frg::manual_box<frg::vector<frg::string_view, MemoryAllocator>> preloads;
 
 static SharedObject *executableSO;
+static uintptr_t vdsoBase = 0;
 extern HIDDEN char __ehdr_start[];
 
 // Global debug interface variable
@@ -242,7 +248,9 @@ extern "C" [[gnu::alias("dl_debug_state"), gnu::visibility("default")]] void _dl
 // This symbol can be used by GDB to find the global interface structure
 [[ gnu::visibility("default") ]] DebugInterface *_dl_debug_addr = &globalDebugInterface;
 
-static frg::vector<frg::string_view, MemoryAllocator> parseList(frg::string_view paths, frg::string_view separators) {
+namespace {
+
+frg::vector<frg::string_view, MemoryAllocator> parseList(frg::string_view paths, frg::string_view separators) {
 	frg::vector<frg::string_view, MemoryAllocator> list{getAllocator()};
 
 	size_t p = 0;
@@ -276,13 +284,70 @@ static frg::vector<frg::string_view, MemoryAllocator> parseList(frg::string_view
 	return list;
 }
 
+void setupVdso(uintptr_t vdsoBase) {
+	auto vdso_header = reinterpret_cast<elf_ehdr *>(vdsoBase);
+	auto vdso_phdrs = reinterpret_cast<void *>(vdsoBase + vdso_header->e_phoff);
+	elf_dyn *vdso_dynamic = nullptr;
+	uintptr_t actual_base = 0;
+	bool found_load = false;
+
+	for (size_t i = 0; i < vdso_header->e_phnum; i++) {
+		auto phdr = reinterpret_cast<elf_phdr *>(
+		    vdsoBase + vdso_header->e_phoff + i * vdso_header->e_phentsize
+		);
+		if (phdr->p_type == PT_LOAD) {
+			actual_base = vdsoBase - phdr->p_vaddr + phdr->p_offset;
+			found_load = true;
+		}
+
+		if (phdr->p_type == PT_DYNAMIC)
+			vdso_dynamic = reinterpret_cast<elf_dyn *>(vdsoBase + phdr->p_offset);
+	}
+
+	if (!found_load || !vdso_dynamic)
+		return;
+
+	const char *vdso_strtab = nullptr;
+	size_t vdso_soname_offset = 0;
+
+	for (auto dyn = vdso_dynamic; dyn->d_tag != DT_NULL; dyn++) {
+		switch (dyn->d_tag) {
+		case DT_STRTAB:
+			vdso_strtab = reinterpret_cast<const char *>(actual_base + dyn->d_un.d_ptr);
+			break;
+		case DT_SONAME:
+			vdso_soname_offset = dyn->d_un.d_val;
+			break;
+		}
+	}
+
+	if (!vdso_strtab)
+		return;
+
+	auto vdso_soname = &vdso_strtab[vdso_soname_offset];
+
+	if (rtldConfig.debug) {
+		mlibc::infoLogger() << "rtld: vDSO base:   " << (void*)vdsoBase << frg::endlog;
+		mlibc::infoLogger() << "rtld: vDSO actual: " << (void*)actual_base << frg::endlog;
+		mlibc::infoLogger() << "rtld: vDSO name:   " << vdso_soname << frg::endlog;
+	}
+
+	auto vdso = initialRepository->injectObjectFromDts(vdso_soname,
+		frg::string<MemoryAllocator> { getAllocator() }, actual_base, vdso_dynamic, 1);
+	vdso->phdrPointer = vdso_phdrs;
+	vdso->phdrCount = vdso_header->e_phnum;
+	vdso->phdrEntrySize = vdso_header->e_phentsize;
+}
+
+} // namespace
+
 #ifndef MLIBC_STATIC_BUILD
 static constexpr uint64_t supportedDtFlags = DF_BIND_NOW;
 static constexpr uint64_t supportedDtFlags1 = DF_1_NOW;
 #endif
 
 extern "C" void *interpreterMain(uintptr_t *entry_stack) {
-	if(logEntryExit)
+	if(rtldConfig.debug)
 		mlibc::infoLogger() << "Entering ld.so" << frg::endlog;
 	entryStack = entry_stack;
 
@@ -290,10 +355,11 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 	// The TID is needed to use futexes, so this caching saves a lot of syscalls.
 	earlyTcb.selfPointer = &earlyTcb;
 	earlyTcb.tid = mlibc::this_tid();
-	if(mlibc::sys_tcb_set(&earlyTcb))
+	if(mlibc::sysdep<TcbSet>(&earlyTcb))
 		__ensure(!"sys_tcb_set() failed");
 	mlibc::tcb_available_flag = true;
 
+	runtimeTlsMapLock.initialize();
 	runtimeTlsMap.initialize();
 	libraryPaths.initialize(getAllocator());
 	preloads.initialize(getAllocator());
@@ -313,7 +379,7 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 	size_t num_ldso_ctors = 0;
 
 	auto ldso_base = getLdsoBase();
-	if(logStartup) {
+	if(rtldConfig.debug) {
 		mlibc::infoLogger() << "ldso: Own base address is: 0x"
 				<< frg::hex_fmt(ldso_base) << frg::endlog;
 		mlibc::infoLogger() << "ldso: Own dynamic section is at: " << _DYNAMIC << frg::endlog;
@@ -378,11 +444,30 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 	__ensure(strtab_offset);
 	__ensure(soname_str);
 
+#endif // !defined(MLIBC_STATIC_BUILD)
+
 	// Find the auxiliary vector by skipping args and environment.
 	auto aux = entryStack;
 	aux += *aux + 1; // First, we skip argc and all args.
 	__ensure(!*aux);
 	aux++;
+
+	const char *env_ld_library_path = nullptr;
+	const char *env_ld_preload = nullptr;
+
+	auto match_config = [](frg::string_view v) {
+		const frg::tuple<const frg::string_view, bool &> config_mapping[] = {
+			{"MLIBC_RTLD_DEBUG", rtldConfig.debug},
+			{"MLIBC_RTLD_DEBUG_VERBOSE", rtldConfig.debug},
+			{"MLIBC_RTLD_DEBUG_VERBOSE", rtldConfig.debugVerbose}
+		};
+
+		for (auto [env, config] : config_mapping) {
+			if (v == env)
+				config = true;
+		}
+	};
+
 	while(*aux) { // Loop through the environment.
 		auto env = reinterpret_cast<char *>(*aux);
 		frg::string_view view{env};
@@ -394,22 +479,17 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 		auto name = view.sub_string(0, s);
 		auto value = const_cast<char *>(view.data() + s + 1);
 
-		if(name == "LD_SHOW_AUXV" && *value && *value != '0') {
-			ldShowAuxv = true;
-		}else if(name == "LD_LIBRARY_PATH" && *value) {
-			for(auto path : parseList(value, ":;"))
-				libraryPaths->push_back(path);
+		if(name == "LD_LIBRARY_PATH" && *value) {
+			env_ld_library_path = value;
 		}else if(name == "LD_PRELOAD" && *value) {
-			*preloads = parseList(value, " :");
+			env_ld_preload = value;
+		}else if (*value && *value != '\0'){
+			match_config(name);
 		}
 
 		aux++;
 	}
 	aux++;
-
-	for (const frg::string_view path : parseList(MLIBC_DEFAULT_LIBRARY_PATHS, "\n")) {
-		libraryPaths->push_back(path);
-	}
 
 	// Parse the actual vector.
 	while(true) {
@@ -417,7 +497,7 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 		if(!(*aux))
 			break;
 
-		if(ldShowAuxv) {
+		if(rtldConfig.debug) {
 			switch(*aux) {
 				case AT_PHDR: mlibc::infoLogger() << "AT_PHDR: 0x" << frg::hex_fmt{*value} << frg::endlog; break;
 				case AT_PHENT: mlibc::infoLogger() << "AT_PHENT: " << *value << frg::endlog; break;
@@ -467,11 +547,35 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 			case AT_EXECFN: execfn = reinterpret_cast<const char *>(*value); break;
 			case AT_RANDOM: stack_entropy = reinterpret_cast<void*>(*value); break;
 			case AT_SECURE: rtldConfig.secureRequired = reinterpret_cast<uintptr_t>(*value); break;
+#ifdef AT_SYSINFO_EHDR
+			case AT_SYSINFO_EHDR: vdsoBase = reinterpret_cast<uintptr_t>(*value); break;
+#endif
 		}
 
 		aux += 2;
 	}
+
+#ifndef MLIBC_STATIC_BUILD
 	globalDebugInterface.base = reinterpret_cast<void*>(ldso_base);
+
+	// Handle the LD_LIBRARY_PATH and LD_PRELOAD environment variables.
+	// This is done here as it needs to know if rtldConfig.secureRequired is set.
+	if (rtldConfig.secureRequired) {
+		if (rtldConfig.debug)
+			mlibc::infoLogger() << "rtld: running in secure mode" << frg::endlog;
+	} else {
+		if (env_ld_library_path) {
+			for(auto path : parseList(env_ld_library_path, ":;"))
+				libraryPaths->push_back(path);
+		}
+
+		if (env_ld_preload)
+			*preloads = parseList(env_ld_preload, " :");
+	}
+
+	for (const frg::string_view path : parseList(MLIBC_DEFAULT_LIBRARY_PATHS, "\n")) {
+		libraryPaths->push_back(path);
+	}
 
 // This is here because libgcc will add a global constructor on glibc Linux
 // (which is what it believes we are due to the aarch64-linux-gnu toolchain)
@@ -481,7 +585,7 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 // using the host toolchain.
 #if defined(__aarch64__) && defined(__gnu_linux__)
 	for (size_t i = 0; i < num_ldso_ctors; i++) {
-		if(logStartup)
+		if(rtldConfig.debug)
 			mlibc::infoLogger() << "ldso: Running own constructor at "
 					<< reinterpret_cast<void *>(ldso_ctors[i])
 					<< frg::endlog;
@@ -496,6 +600,8 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 #endif
 
 #else
+	(void)env_ld_library_path;
+	(void)env_ld_preload;
 	auto ehdr = reinterpret_cast<elf_ehdr*>(__ehdr_start);
 	phdr_pointer = reinterpret_cast<void*>((uintptr_t)ehdr->e_phoff + (uintptr_t)ehdr);
 	phdr_entry_size = ehdr->e_phentsize;
@@ -505,7 +611,7 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 	__ensure(phdr_pointer);
 	__ensure(entry_pointer);
 
-	if(logStartup)
+	if(rtldConfig.debug)
 		mlibc::infoLogger() << "ldso: Executable PHDRs are at " << phdr_pointer
 				<< frg::endlog;
 
@@ -514,7 +620,22 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 
 	globalScope.initialize(true);
 
+	if (vdsoBase)
+		setupVdso(vdsoBase);
+
 	// Add the dynamic linker, as well as the exectuable to the repository.
+	// We inject the executable first such that it is the first entry in dl_iterate_phdr.
+#ifndef MLIBC_STATIC_BUILD
+	executableSO = initialRepository->injectObjectFromPhdrs(execfn,
+		frg::string<MemoryAllocator> { execfn, getAllocator() },
+		phdr_pointer, phdr_entry_size, phdr_count, entry_pointer, 1);
+#else
+	executableSO = initialRepository->injectStaticObject(execfn,
+			frg::string<MemoryAllocator>{ execfn, getAllocator() },
+			phdr_pointer, phdr_entry_size, phdr_count, entry_pointer, 1);
+	globalDebugInterface.base = (void*)executableSO->baseAddress;
+#endif
+
 #ifndef MLIBC_STATIC_BUILD
 	auto ldso_soname = reinterpret_cast<const char *>(ldso_base + strtab_offset + soname_str);
 	auto ldso = initialRepository->injectObjectFromDts(ldso_soname,
@@ -528,11 +649,6 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 	ldso->phdrCount = ldso_ehdr->e_phnum;
 	ldso->phdrEntrySize = ldso_ehdr->e_phentsize;
 
-	// TODO: support non-zero base addresses?
-	executableSO = initialRepository->injectObjectFromPhdrs(execfn,
-		frg::string<MemoryAllocator> { execfn, getAllocator() },
-		phdr_pointer, phdr_entry_size, phdr_count, entry_pointer, 1);
-
 	// We can't initialise the ldso object after the executable SO,
 	// so we have to set the ldso path after loading both.
 	ldso->path = executableSO->interpreterPath;
@@ -543,11 +659,6 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 		initialRepository->discoverDependenciesFromLoadedObject(current);
 		current->dependenciesDiscovered = true;
 	}
-#else
-	executableSO = initialRepository->injectStaticObject(execfn,
-			frg::string<MemoryAllocator>{ execfn, getAllocator() },
-			phdr_pointer, phdr_entry_size, phdr_count, entry_pointer, 1);
-	globalDebugInterface.base = (void*)executableSO->baseAddress;
 #endif
 
 	globalDebugInterface.head = &executableSO->linkMap;
@@ -559,7 +670,7 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 
 	auto tcb = allocateTcb();
 	tcb->tid = earlyTcb.tid;
-	if(mlibc::sys_tcb_set(tcb))
+	if(mlibc::sysdep<TcbSet>(tcb))
 		__ensure(!"sys_tcb_set() failed");
 
 	globalDebugInterface.ver = 1;
@@ -569,7 +680,7 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 
 	linker.initObjects(initialRepository.get());
 
-	if(logEntryExit)
+	if(rtldConfig.debug)
 		mlibc::infoLogger() << "Leaving ld.so, jump to "
 				<< (void *)executableSO->entry << frg::endlog;
 	return executableSO->entry;
@@ -606,7 +717,7 @@ extern "C" [[ gnu::visibility("default") ]] void __dlapi_exit() {
 
 extern "C" [[ gnu::visibility("default") ]]
 void *__dlapi_open(const char *file, int flags, void *returnAddress) {
-	if (logDlCalls)
+	if (rtldConfig.debug)
 		mlibc::infoLogger() << "rtld: __dlapi_open(" << (file ? file : "nullptr") << ")" << frg::endlog;
 
 	if (flags & RTLD_DEEPBIND)
@@ -618,16 +729,18 @@ void *__dlapi_open(const char *file, int flags, void *returnAddress) {
 	// TODO: Thread-safety!
 	auto rts = rtsCounter++;
 
-	SharedObject *object;
-	if (flags & RTLD_NOLOAD) {
-		object = initialRepository->findLoadedObject(file);
-		if (object && object->globalRts == 0 && (flags & RTLD_GLOBAL)) {
-			// The object was opened with RTLD_LOCAL, but we are called with RTLD_NOLOAD | RTLD_GLOBAL.
-			// According to the man page, we should promote to the global scope here.
-			object->globalRts = rts;
-			globalScope->appendObject(object);
-		}
-	} else {
+	auto objectName = frg::string_view{file};
+	auto lastSlash = objectName.find_last('/');
+	if (lastSlash != static_cast<size_t>(-1))
+		objectName = objectName.sub_string(lastSlash + 1, objectName.size() - (lastSlash + 1));
+
+	SharedObject *object = initialRepository->findLoadedObject(objectName);
+	if (object && object->globalRts == 0 && (flags & RTLD_GLOBAL)) {
+		// The object was opened with RTLD_LOCAL, but we are called with RTLD_GLOBAL.
+		// According to the man page, we should promote to the global scope here.
+		object->globalRts = rts;
+		globalScope->appendObject(object);
+	} else if ((flags & RTLD_NOLOAD) == 0) {
 		bool isGlobal = flags & RTLD_GLOBAL;
 		Scope *newScope = isGlobal ? globalScope.get() : nullptr;
 
@@ -636,8 +749,8 @@ void *__dlapi_open(const char *file, int flags, void *returnAddress) {
 			// In order to know which RUNPATH / RPATH to process, we must find the calling object.
 			SharedObject *origin = initialRepository->findCaller(returnAddress);
 			if (!origin) {
-				mlibc::panicLogger() << "rtld: unable to determine calling object of dlopen "
-					<< "(ra = " << returnAddress << ")" << frg::endlog;
+				// When we can't find the origin, assume it's the main executable (copies glibc behavior)
+				origin = executableSO;
 			}
 
 			objectResult = initialRepository->requestObjectWithName(file, origin, newScope, !isGlobal, rts);
@@ -693,7 +806,7 @@ void *__dlapi_open(const char *file, int flags, void *returnAddress) {
 
 extern "C" [[ gnu::visibility("default") ]]
 void *__dlapi_resolve(void *handle, const char *string, void *returnAddress, const char *version) {
-	if (logDlCalls) {
+	if (rtldConfig.debug) {
 		const char *name;
 		bool quote = false;
 		if (handle == RTLD_DEFAULT) {
@@ -716,7 +829,16 @@ void *__dlapi_resolve(void *handle, const char *string, void *returnAddress, con
 		targetVersion = SymbolVersion{version};
 
 	if (handle == RTLD_DEFAULT) {
-		target = globalScope->resolveSymbol(string, 0, 0, targetVersion);
+		SharedObject *origin = initialRepository->findCaller(returnAddress);
+		if (!origin)
+			mlibc::panicLogger() << "rtld: unable to determine calling object of dlsym "
+				<< "(ra = " << returnAddress << ")" << frg::endlog;
+
+		if (origin->symbolicResolution)
+			target = resolveInObject(origin, string, targetVersion);
+
+		if (!target)
+			target = globalScope->resolveSymbol(string, 0, 0, targetVersion);
 	} else if (handle == RTLD_NEXT) {
 		SharedObject *origin = initialRepository->findCaller(returnAddress);
 		if (!origin) {
@@ -768,7 +890,7 @@ void *__dlapi_resolve(void *handle, const char *string, void *returnAddress, con
 	}
 
 	if (!target) {
-		if (logDlCalls)
+		if (rtldConfig.debug)
 			mlibc::infoLogger() << "rtld: could not resolve \"" << string << "\"" << frg::endlog;
 
 		lastError = "Cannot resolve requested symbol";
@@ -777,18 +899,80 @@ void *__dlapi_resolve(void *handle, const char *string, void *returnAddress, con
 	return reinterpret_cast<void *>(target->virtualAddress());
 }
 
-struct __dlapi_symbol {
-	const char *file;
-	void *base;
-	const char *symbol;
-	void *address;
-	const void *elf_symbol;
-	void *link_map;
-};
+extern "C" [[gnu::visibility("default")]]
+void *__dlapi_vdsosym(const char *string, const char *version) {
+	if (!string)
+		return nullptr;
+
+	if (!vdsoBase)
+		return nullptr;
+
+	if (rtldConfig.debug)
+		mlibc::infoLogger() << "rtld: __dlapi_vdsosym(\"" << string << "\", "
+		                    << (version ? "\"" : "") << (version ? version : "nullptr")
+		                    << (version ? "\"" : "") << ")" << frg::endlog;
+
+	auto ehdr = reinterpret_cast<elf_ehdr *>(vdsoBase);
+	elf_dyn *dynamic = nullptr;
+	uintptr_t actual_base = 0;
+
+	for (size_t i = 0; i < ehdr->e_phnum; i++) {
+		auto phdr = reinterpret_cast<elf_phdr *>(vdsoBase + ehdr->e_phoff + i * ehdr->e_phentsize);
+		// On x86_64 Linux, this appears to be equal to the vDSO base, but on other platforms like
+		// aarch64 it is 0, and the actual address is already relocated.
+		if (phdr->p_type == PT_LOAD)
+			actual_base = vdsoBase - phdr->p_vaddr + phdr->p_offset;
+		if (phdr->p_type == PT_DYNAMIC)
+			dynamic = reinterpret_cast<elf_dyn *>(vdsoBase + phdr->p_offset);
+	}
+
+	size_t symtab_size = 0;
+	elf_sym* symtab = nullptr;
+	const char* strtab = nullptr;
+
+	while (dynamic->d_tag != DT_NULL) {
+		switch (dynamic->d_tag) {
+			case DT_SYMTAB:
+				symtab = reinterpret_cast<elf_sym*>(actual_base + dynamic->d_un.d_ptr);
+				break;
+			case DT_STRTAB:
+				strtab = reinterpret_cast<const char*>(actual_base + dynamic->d_un.d_ptr);
+				break;
+			case DT_HASH:
+				symtab_size = reinterpret_cast<SystemVHashTableHeader*>(actual_base + dynamic->d_un.d_ptr)->nChain;
+				break;
+		}
+		dynamic++;
+	}
+
+	if (!symtab_size || !symtab || !strtab)
+		return nullptr;
+
+	for (size_t i = 0; i < symtab_size; i++) {
+		// Check if this symbol has one of the accepted types and binds.
+		if (!(1 << ELF_ST_TYPE(symtab[i].st_info) & (1 << STT_NOTYPE | 1 << STT_OBJECT | 1 << STT_FUNC)))
+			continue;
+
+		if (!(1 << ELF_ST_BIND(symtab[i].st_info) & (1 << STB_GLOBAL | 1 << STB_WEAK | 1 << STB_GNU_UNIQUE)))
+			continue;
+
+		if (frg::string_view {string} != frg::string_view {&strtab[symtab[i].st_name]})
+			continue;
+
+		// TODO: Symbol versioning
+
+		uintptr_t addr = actual_base + symtab[i].st_value;
+		if (ELF_ST_TYPE(symtab[i].st_info) == STT_GNU_IFUNC)
+			addr = reinterpret_cast<uintptr_t (*)()>(addr)();
+		return reinterpret_cast<void *>(addr);
+	}
+
+	return nullptr;
+}
 
 extern "C" [[ gnu::visibility("default") ]]
 int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
-	if (logDlCalls)
+	if (rtldConfig.debug)
 		mlibc::infoLogger() << "rtld: __dlapi_reverse(" << ptr << ")" << frg::endlog;
 
 	for(size_t i = 0; i < initialRepository->loadedObjects.size(); i++) {
@@ -840,7 +1024,7 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
 			ObjectSymbol cand{object, (elf_sym *)(object->baseAddress
 					+ object->symbolTableOffset + i * sizeof(elf_sym))};
 			if(eligible(cand) && cand.contains(reinterpret_cast<uintptr_t>(ptr))) {
-				if (logDlCalls)
+				if (rtldConfig.debug)
 					mlibc::infoLogger() << "rtld: Found symbol " << cand.getString() << " in object "
 							<< object->path << frg::endlog;
 
@@ -867,7 +1051,7 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
 			uintptr_t start = object->baseAddress + phdr->p_vaddr;
 			uintptr_t end = start + phdr->p_memsz;
 			if(reinterpret_cast<uintptr_t>(ptr) >= start && reinterpret_cast<uintptr_t>(ptr) < end) {
-				if (logDlCalls)
+				if (rtldConfig.debug)
 					mlibc::infoLogger() << "rtld: Found DSO " << object->path << frg::endlog;
 				info->file = object->path.data();
 				info->base = reinterpret_cast<void *>(object->baseAddress);
@@ -880,7 +1064,7 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
 		}
 	}
 
-	if (logDlCalls)
+	if (rtldConfig.debug)
 		mlibc::infoLogger() << "rtld: Could not find symbol in __dlapi_reverse()" << frg::endlog;
 
 	return -1;
@@ -888,7 +1072,7 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
 
 extern "C" [[ gnu::visibility("default") ]]
 int __dlapi_close(void *) {
-	if (logDlCalls)
+	if (rtldConfig.debug)
 		mlibc::infoLogger() << "mlibc: dlclose() is a no-op" << frg::endlog;
 	return 0;
 }
@@ -901,10 +1085,11 @@ int __dlapi_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void*), 
 	for (auto object : initialRepository->loadedObjects) {
 		struct dl_phdr_info info;
 		info.dlpi_addr = object->baseAddress;
-		info.dlpi_name = object->name.data();
 
 		if(object->isMainObject) {
 			info.dlpi_name = "";
+		} else if(!object->path.empty()) {
+			info.dlpi_name = object->path.data();
 		} else {
 			info.dlpi_name = object->name.data();
 		}
@@ -938,42 +1123,58 @@ void __dlapi_enter(uintptr_t *entry_stack) {
 #if __MLIBC_GLIBC_OPTION
 
 extern "C" [[gnu::visibility("default")]] int __dlapi_find_object(void *address, dl_find_object *result) {
-	for(const SharedObject *object : initialRepository->loadedObjects) {
-		if(object->baseAddress > reinterpret_cast<uintptr_t>(address))
+	for (const SharedObject *object : initialRepository->loadedObjects) {
+		bool found_address = false;
+		uintptr_t map_start = UINTPTR_MAX;
+		uintptr_t map_end = 0;
+		void *eh_frame = nullptr;
+
+		for (size_t j = 0; j < object->phdrCount; j++) {
+			auto phdr = reinterpret_cast<elf_phdr *>(
+			    reinterpret_cast<uintptr_t>(object->phdrPointer) + j * object->phdrEntrySize
+			);
+			if (phdr->p_type == DLFO_EH_SEGMENT_TYPE) {
+				eh_frame = reinterpret_cast<void *>(object->baseAddress + phdr->p_vaddr);
+				continue;
+			}
+
+			if (phdr->p_type != PT_LOAD)
+				continue;
+
+			uintptr_t start = object->baseAddress + phdr->p_vaddr;
+			uintptr_t end = start + phdr->p_memsz;
+			if (reinterpret_cast<uintptr_t>(address) >= start
+			    && reinterpret_cast<uintptr_t>(address) < end)
+				found_address = true;
+
+			map_start = std::min(map_start, start);
+			map_end = std::max(map_end, end);
+		}
+
+		if (!found_address)
 			continue;
 
-		if(object->inLinkMap)
+		if (object->inLinkMap)
 			result->dlfo_link_map = (link_map *)&object->linkMap;
 		else
 			result->dlfo_link_map = nullptr;
 
-		uintptr_t end_addr = 0;
-		for(size_t j = 0; j < object->phdrCount; j++) {
-			auto phdr = (elf_phdr *)((uintptr_t)object->phdrPointer + j * object->phdrEntrySize);
-			if(phdr->p_type == DLFO_EH_SEGMENT_TYPE) {
-				result->dlfo_eh_frame = (void *)(object->baseAddress + phdr->p_vaddr);
-				continue;
-			}
-			if(phdr->p_type != PT_LOAD) {
-				continue;
-			}
-			end_addr = frg::max(end_addr, phdr->p_vaddr + phdr->p_memsz);
-		}
-
-		if(reinterpret_cast<uintptr_t>(address) > object->baseAddress + end_addr)
-			continue;
-
 		result->dlfo_flags = 0;
-		result->dlfo_map_start = (void *)object->baseAddress;
-		result->dlfo_map_end = (void *)(object->baseAddress + end_addr);
+		result->dlfo_eh_frame = eh_frame;
+		result->dlfo_map_start = reinterpret_cast<void *>(map_start);
+		result->dlfo_map_end = reinterpret_cast<void *>(map_end);
 
 // TODO: fill these fields with proper values
 #if DLFO_STRUCT_HAS_EH_DBASE
-		mlibc::infoLogger() << "mlibc: _dl_find_object dlfo_eh_dbase is not implemented and always returns NULL" << frg::endlog;
+		mlibc::infoLogger()
+		    << "mlibc: _dl_find_object dlfo_eh_dbase is not implemented and always returns NULL"
+		    << frg::endlog;
 		result->dlfo_eh_dbase = nullptr;
 #endif // DLFO_STRUCT_HAS_EH_DBASE
 #if DLFO_STRUCT_HAS_EH_COUNT
-	mlibc::infoLogger() << "mlibc: _dl_find_object dlfo_eh_count is not implemented and always returns 0" << frg::endlog;
+		mlibc::infoLogger()
+		    << "mlibc: _dl_find_object dlfo_eh_count is not implemented and always returns 0"
+		    << frg::endlog;
 		result->dlfo_eh_count = 0;
 #endif // DLFO_STRUCT_HAS_EH_COUNT
 

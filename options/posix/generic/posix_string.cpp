@@ -3,19 +3,26 @@
 #endif
 
 #include <bits/ensure.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <signal.h>
+#include <wchar.h>
 
+#include <mlibc/collation.hpp>
 #include <mlibc/debug.hpp>
+#include <mlibc/locale.hpp>
+#include <mlibc/strings.hpp>
 
 char *strdup(const char *string) {
 	auto num_bytes = strlen(string);
 
 	char *new_string = (char *)malloc(num_bytes + 1);
-	if(!new_string) // TODO: set errno
+	if(!new_string) {
+		errno = ENOMEM;
 		return nullptr;
+	}
 
 	memcpy(new_string, string, num_bytes);
 	new_string[num_bytes] = 0;
@@ -25,8 +32,10 @@ char *strdup(const char *string) {
 char *strndup(const char *string, size_t max_size) {
 	auto num_bytes = strnlen(string, max_size);
 	char *new_string = (char *)malloc(num_bytes + 1);
-	if(!new_string) // TODO: set errno
+	if(!new_string) {
+		errno = ENOMEM;
 		return nullptr;
+	}
 
 	memcpy(new_string, string, num_bytes);
 	new_string[num_bytes] = 0;
@@ -40,18 +49,7 @@ char *stpcpy(char *__restrict dest, const char *__restrict src) {
 }
 
 char *stpncpy(char *__restrict dest, const char *__restrict src, size_t n) {
-	size_t nulls, copied, srcLen = strlen(src);
-	if (n >= srcLen) {
-		nulls = n - srcLen;
-		copied = srcLen;
-	} else {
-		nulls = 0;
-		copied = n;
-	}
-
-	memcpy(dest, src, copied);
-	memset(dest + srcLen, 0, nulls);
-	return dest + n - nulls;
+	return mlibc::stpncpy(dest, src, n);
 }
 
 size_t strnlen(const char *s, size_t n) {
@@ -136,9 +134,22 @@ char *strcasestr(const char *s, const char *pattern) {
 	return nullptr;
 }
 
-void *memccpy(void *__restrict, const void *__restrict, int, size_t) {
-	__ensure(!"Not implemented");
-	__builtin_unreachable();
+void *memccpy(void *__restrict dest, const void *__restrict src, int c, size_t n) {
+	auto *d = static_cast<unsigned char *>(dest);
+	const auto *s = static_cast<const unsigned char *>(src);
+	const unsigned char target = static_cast<unsigned char>(c);
+
+	for (size_t i = 0; i < n; i++) {
+		*d = *s;
+
+		if (*d == target)
+			return static_cast<void *>(d + 1);
+
+		d++;
+		s++;
+	}
+
+	return nullptr;
 }
 
 // This implementation was taken from musl
@@ -157,17 +168,30 @@ char *strerror_l(int errnum, locale_t) {
 	return strerror(errnum);
 }
 
-// BSD extensions.
-// Taken from musl
-size_t strlcpy(char *d, const char *s, size_t n) {
-	char *d0 = d;
+void *memmem(const void *hs, size_t haystackLen, const void *nd, size_t needleLen) {
+	const char *haystack = static_cast<const char *>(hs);
+	const char *needle = static_cast<const char *>(nd);
 
-	if(!n--)
-		goto finish;
-	for(; n && (*d=*s); n--, s++, d++);
-	*d = 0;
-finish:
-	return d-d0 + strlen(s);
+	for (size_t i = 0; i < haystackLen; i++) {
+		bool found = true;
+
+		for (size_t j = 0; j < needleLen; j++) {
+			if (i + j >= haystackLen || haystack[i + j] != needle[j]) {
+				found = false;
+				break;
+			}
+		}
+
+		if(found)
+			return const_cast<char *>(&haystack[i]);
+	}
+
+	return nullptr;
+}
+
+// BSD extensions.
+size_t strlcpy(char *d, const char *s, size_t n) {
+	return mlibc::strlcpy(d, s, n);
 }
 
 size_t strlcat(char *d, const char *s, size_t n) {
@@ -175,5 +199,30 @@ size_t strlcat(char *d, const char *s, size_t n) {
 	if(l == n) {
 		return l + strlen(s);
 	}
-	return l + strlcpy(d + l, s, n - l);
+	return l + mlibc::strlcpy(d + l, s, n - l);
+}
+
+int wcscoll_l(const wchar_t *a, const wchar_t *b, locale_t loc) {
+	const auto l = static_cast<const mlibc::localeinfo *>(loc);
+	return mlibc::strcoll<wchar_t>(a, b, l);
+}
+
+size_t wcsxfrm_l(wchar_t *__restrict dest, const wchar_t *__restrict src, size_t size, locale_t loc) {
+	auto l = static_cast<mlibc::localeinfo *>(loc);
+
+	auto nrules = l->collate.get(_NL_COLLATE_NRULES).asUint32();
+	if (nrules == 0) {
+		size_t len = wcslen(src);
+		if (size)
+			wcpncpy(dest, src, frg::min(len + 1, size));
+		return len;
+	}
+
+	if (*src == L'\0') {
+		if (size)
+			*dest = L'\0';
+		return 0;
+	}
+
+	return mlibc::do_xfrm<wchar_t>(reinterpret_cast<const wint_t *>(src), dest, size, mlibc::coll_context<wchar_t>::from_localeinfo(l));
 }
