@@ -65,15 +65,15 @@ int login_tty(int fd) {
 		return -1;
 
 	MLIBC_CHECK_OR_ENOSYS(mlibc::IsImplemented<Dup2>, -1);
-	if(int e = mlibc::sysdep<Dup2>(fd, 0, STDIN_FILENO); e) {
+	if(int e = mlibc::sysdep_or_panic<Dup2>(fd, 0, STDIN_FILENO); e) {
 		errno = e;
 		return -1;
 	}
-	if(int e = mlibc::sysdep<Dup2>(fd, 0, STDOUT_FILENO); e) {
+	if(int e = mlibc::sysdep_or_panic<Dup2>(fd, 0, STDOUT_FILENO); e) {
 		errno = e;
 		return -1;
 	}
-	if(int e = mlibc::sysdep<Dup2>(fd, 0, STDERR_FILENO); e) {
+	if(int e = mlibc::sysdep_or_panic<Dup2>(fd, 0, STDERR_FILENO); e) {
 		errno = e;
 		return -1;
 	}

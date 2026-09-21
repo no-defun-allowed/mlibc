@@ -2,9 +2,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/types.h>
-#include <mlibc/sysdeps.hpp>
-#include <mlibc/sysdep-traits.hpp>
-
+#include <mlibc/all-sysdeps.hpp>
 
 #define STUB(NAME) { fioxa_log("Hit a stub " NAME); fioxa_panic(); }
 
@@ -29,7 +27,8 @@ extern "C" {
 namespace mlibc {
   void Sysdeps<LibcLog>::operator()(const char *message) { fioxa_log(message); }
   [[noreturn]] void Sysdeps<LibcPanic>::operator()() { fioxa_panic(); }
-  
+
+  int Sysdeps<AnonAllocate>::operator()(size_t size, void **pointer) { return fioxa_map(size, pointer); }
   int Sysdeps<AnonFree>::operator()(void *pointer, size_t size) { return fioxa_unmap(pointer, size); }
   int Sysdeps<ClockGet>::operator()(int clock, time_t *seconds, long *nanoseconds) {
     return fioxa_clock(seconds, nanoseconds);
@@ -63,5 +62,6 @@ namespace mlibc {
     return ret;
   }
 
-  int Sysdeps<AnonAllocate>::operator()(size_t size, void **pointer) { return fioxa_map(size, pointer); }
+  static_assert(std::same_as<Sysdeps<Sigaction>, NoImpl>);
+  static_assert(!IsImplemented<Sigaction>);
 }
